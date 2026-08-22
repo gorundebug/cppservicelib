@@ -9,10 +9,8 @@ include(${CMAKE_CURRENT_LIST_DIR}/DependencyVersions.cmake)
 # source tree instead.
 if(NOT FETCHCONTENT_SOURCE_DIR_RDKAFKA)
   FetchContent_Declare(servicelib_librdkafka
-      GIT_REPOSITORY "${SERVICELIB_RDKAFKA_REPOSITORY}"
-      GIT_TAG "${SERVICELIB_RDKAFKA_VERSION}"
-      GIT_SHALLOW TRUE
-      GIT_PROGRESS TRUE)
+      URL "${SERVICELIB_GITHUB_ARCHIVE_BASE}/confluentinc/librdkafka/archive/refs/tags/${SERVICELIB_RDKAFKA_VERSION}.tar.gz"
+      DOWNLOAD_EXTRACT_TIMESTAMP FALSE)
   FetchContent_GetProperties(servicelib_librdkafka)
   if(NOT servicelib_librdkafka_POPULATED)
     FetchContent_Populate(servicelib_librdkafka)
