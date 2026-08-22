@@ -1,0 +1,11 @@
+.git
+.ccache
+build
+build-*
+build_*
+cmake-build-*
+*.o
+*.a
+*.so
+*.dylib
+.DS_Store

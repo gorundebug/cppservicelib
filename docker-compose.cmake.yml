@@ -1,0 +1,34 @@
+services:
+  test:
+    image: cppservicelib-build
+    build:
+      context: .
+      dockerfile: Dockerfile.cmake
+      additional_contexts:
+        userver-source: ${USERVER_SOURCE_CONTEXT:-https://github.com/userver-framework/userver.git#c9f77729c0edce7e423def2d4a4450aa7fc9d259}
+    working_dir: /workspace
+    environment:
+      CCACHE_DIR: /ccache
+      CCACHE_BASEDIR: /workspace
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: ${CCACHE_MAXSIZE:-20G}
+      CPM_SOURCE_CACHE: /var/cache/cpm
+    volumes:
+      - .:/workspace
+      - cppservicelib-build:/workspace/build
+      - cppservicelib-fetchcontent:/workspace/build/_deps
+      - cppservicelib-ccache:/ccache
+      - cppservicelib-cpm-source:/var/cache/cpm
+    command:
+      - /bin/bash
+      - -lc
+      - >-
+        ./scripts/run_with_progress.sh "Debug configure" cmake --preset docker
+        && ./scripts/run_with_progress.sh "Debug build" cmake --build --preset docker
+        && ./scripts/run_with_progress.sh "Test suite" ctest --preset docker
+
+volumes:
+  cppservicelib-build:
+  cppservicelib-fetchcontent:
+  cppservicelib-ccache:
+  cppservicelib-cpm-source:

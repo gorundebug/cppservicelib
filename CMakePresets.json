@@ -1,0 +1,50 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "host",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/host",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "SERVICELIB_BUILD_TESTS": "ON",
+        "SERVICELIB_BUILD_BENCHMARKS": "OFF",
+        "SERVICELIB_USERVER_SOURCE_DIR": "$env{USERVER_SOURCE_DIR}"
+      }
+    },
+    {
+      "name": "docker",
+      "generator": "Ninja",
+      "binaryDir": "/workspace/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "SERVICELIB_BUILD_TESTS": "ON",
+        "SERVICELIB_BUILD_BENCHMARKS": "OFF",
+        "SERVICELIB_USERVER_SOURCE_DIR": "/opt/userver",
+        "CPM_SOURCE_CACHE": "/var/cache/cpm"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "host",
+      "configurePreset": "host"
+    },
+    {
+      "name": "docker",
+      "configurePreset": "docker"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "host",
+      "configurePreset": "host",
+      "output": {"outputOnFailure": true}
+    },
+    {
+      "name": "docker",
+      "configurePreset": "docker",
+      "output": {"outputOnFailure": true}
+    }
+  ]
+}
