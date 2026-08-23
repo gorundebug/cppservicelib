@@ -15,6 +15,7 @@ endif()
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
+find_package(OpenSSL REQUIRED)
 
 option(SERVICELIB_BUILD_TESTS "Build servicelib unit tests" OFF)
 option(SERVICELIB_BUILD_BENCHMARKS "Build servicelib benchmarks" OFF)
@@ -73,6 +74,7 @@ target_compile_features(servicelib INTERFACE cxx_std_20)
 target_include_directories(servicelib INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+target_link_libraries(servicelib INTERFACE OpenSSL::Crypto)
 
 if(SERVICELIB_BUILD_TESTS OR SERVICELIB_BUILD_BENCHMARKS)
   include(CTest)
@@ -131,6 +133,8 @@ if(SERVICELIB_BUILD_TESTS)
       tests/operators_compile_test.cpp)
   servicelib_add_test(servicelib_config_loader_test
       tests/config_loader_test.cpp)
+  servicelib_add_test(servicelib_schedule_test
+      tests/schedule_test.cpp)
   servicelib_add_test(servicelib_status_test
       tests/status_test.cpp)
   servicelib_add_test(servicelib_tracing_test
