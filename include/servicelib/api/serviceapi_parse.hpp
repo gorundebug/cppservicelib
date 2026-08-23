@@ -226,7 +226,6 @@ constexpr userver::utils::TrivialBiMap kDataConnectorImplementationMap = [](auto
       .Case("python/apscheduler", DataConnectorImplementation::kPythonAPScheduler)
       .Case("rust/croner", DataConnectorImplementation::kRustCroner)
       .Case("node/croner", DataConnectorImplementation::kNodeCroner)
-      .Case("cpp/libcron", DataConnectorImplementation::kCppLibcron)
       .Case("temporal/go", DataConnectorImplementation::kTemporalGo)
       .Case("temporal/python", DataConnectorImplementation::kTemporalPython)
       .Case("temporal/typescript", DataConnectorImplementation::kTemporalTypeScript);
