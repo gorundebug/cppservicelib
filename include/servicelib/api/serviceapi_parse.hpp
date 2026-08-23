@@ -123,7 +123,8 @@ constexpr userver::utils::TrivialBiMap kCallSemanticsMap = [](auto selector) {
       .Case("FunctionCall", CallSemantics::kFunctionCall)
       .Case("TaskPool", CallSemantics::kTaskPool)
       .Case("PriorityTaskPool", CallSemantics::kPriorityTaskPool)
-      .Case("ParallelCall", CallSemantics::kParallelCall);
+      .Case("ParallelCall", CallSemantics::kParallelCall)
+      .Case("DurableCall", CallSemantics::kDurableCall);
 };
 
 inline CallSemantics Parse(const userver::formats::yaml::Value& value,
@@ -137,7 +138,9 @@ constexpr userver::utils::TrivialBiMap kDataConnectorTypeMap = [](auto selector)
       .Case("HTTP", DataConnectorType::kHTTP)
       .Case("gRPC", DataConnectorType::kGRPC)
       .Case("Kafka", DataConnectorType::kKafka)
-      .Case("Custom", DataConnectorType::kCustom);
+      .Case("Custom", DataConnectorType::kCustom)
+      .Case("Cron", DataConnectorType::kCron)
+      .Case("Temporal", DataConnectorType::kTemporal);
 };
 
 inline DataConnectorType Parse(const userver::formats::yaml::Value& value,
@@ -218,7 +221,15 @@ constexpr userver::utils::TrivialBiMap kDataConnectorImplementationMap = [](auto
       .Case("rust/rdkafka", DataConnectorImplementation::kRustRdkafka)
       .Case("node/http", DataConnectorImplementation::kNodeHTTP)
       .Case("grpc/grpc-js", DataConnectorImplementation::kGrpcJS)
-      .Case("confluent/kafka-javascript", DataConnectorImplementation::kConfluentKafkaJavaScript);
+      .Case("confluent/kafka-javascript", DataConnectorImplementation::kConfluentKafkaJavaScript)
+      .Case("go/gocron", DataConnectorImplementation::kGoGocron)
+      .Case("python/apscheduler", DataConnectorImplementation::kPythonAPScheduler)
+      .Case("rust/croner", DataConnectorImplementation::kRustCroner)
+      .Case("node/croner", DataConnectorImplementation::kNodeCroner)
+      .Case("cpp/libcron", DataConnectorImplementation::kCppLibcron)
+      .Case("temporal/go", DataConnectorImplementation::kTemporalGo)
+      .Case("temporal/python", DataConnectorImplementation::kTemporalPython)
+      .Case("temporal/typescript", DataConnectorImplementation::kTemporalTypeScript);
 };
 
 inline DataConnectorImplementation Parse(const userver::formats::yaml::Value& value,
@@ -248,6 +259,28 @@ constexpr userver::utils::TrivialBiMap kKafkaSaslMechanismMap = [](auto selector
 inline KafkaSaslMechanism Parse(const userver::formats::yaml::Value& value,
                     userver::formats::parse::To<KafkaSaslMechanism>) {
   return userver::utils::ParseFromValueString(value, kKafkaSaslMechanismMap);
+}
+
+constexpr userver::utils::TrivialBiMap kScheduleOverlapPolicyMap = [](auto selector) {
+  return selector()
+      .Case("Allow", ScheduleOverlapPolicy::kAllow)
+      .Case("Skip", ScheduleOverlapPolicy::kSkip);
+};
+
+inline ScheduleOverlapPolicy Parse(const userver::formats::yaml::Value& value,
+                    userver::formats::parse::To<ScheduleOverlapPolicy>) {
+  return userver::utils::ParseFromValueString(value, kScheduleOverlapPolicyMap);
+}
+
+constexpr userver::utils::TrivialBiMap kScheduleMissedRunPolicyMap = [](auto selector) {
+  return selector()
+      .Case("Skip", ScheduleMissedRunPolicy::kSkip)
+      .Case("FireOnce", ScheduleMissedRunPolicy::kFireOnce);
+};
+
+inline ScheduleMissedRunPolicy Parse(const userver::formats::yaml::Value& value,
+                    userver::formats::parse::To<ScheduleMissedRunPolicy>) {
+  return userver::utils::ParseFromValueString(value, kScheduleMissedRunPolicyMap);
 }
 
 constexpr userver::utils::TrivialBiMap kTypeDefinitionFormatMap = [](auto selector) {
@@ -288,6 +321,7 @@ constexpr userver::utils::TrivialBiMap kDataTypeMap = [](auto selector) {
       .Case("uint64", DataType::kUint64)
       .Case("any", DataType::kAny)
       .Case("error", DataType::kError)
+      .Case("schedule trigger", DataType::kScheduleTrigger)
       .Case("array", DataType::kArray)
       .Case("map", DataType::kMap)
       .Case("struct", DataType::kStruct)

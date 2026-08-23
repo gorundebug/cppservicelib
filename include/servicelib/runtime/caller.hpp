@@ -264,12 +264,10 @@ class ParallelCaller final : public Caller<T> {
 
   void consume(MessageContext ctx, Payload<T> payload) override {
     this->recordMessage();
-    environment_.parallel(
-        [this, ctx, p = std::move(payload)]() mutable {
-          [[maybe_unused]] auto activeSpan =
-              this->startCallSpan(ctx, "parallel");
-          consumer_.consume(std::move(ctx), std::move(p));
-        });
+    environment_.parallel([this, ctx, p = std::move(payload)]() mutable {
+      [[maybe_unused]] auto activeSpan = this->startCallSpan(ctx, "parallel");
+      consumer_.consume(std::move(ctx), std::move(p));
+    });
   }
 
   bool isAsync() const noexcept override { return true; }
@@ -373,12 +371,17 @@ std::unique_ptr<Caller<T>> makeCallerFromEnv(
         std::move(params));
   }
 
-  if (semantics->parallelCall.has_value()) {
-    return std::make_unique<ParallelCaller<T>>(consumer, *env,
-                                                std::move(params));
+  if (semantics->durableCall.has_value()) {
+    throw std::runtime_error(
+        "Temporal DurableCall is not supported by the C++ runtime");
   }
 
-  return std::make_unique<DirectCaller<T>>(consumer, std::move(params));
+  if (semantics->parallelCall.has_value()) {
+    return std::make_unique<ParallelCaller<T>>(consumer, *env,
+                                               std::move(params));
+  }
+
+  throw std::runtime_error("unsupported call semantics");
 }
 
 }  // namespace servicelib
