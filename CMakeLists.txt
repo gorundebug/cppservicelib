@@ -19,6 +19,7 @@ find_package(OpenSSL REQUIRED)
 
 option(SERVICELIB_BUILD_TESTS "Build servicelib unit tests" OFF)
 option(SERVICELIB_BUILD_BENCHMARKS "Build servicelib benchmarks" OFF)
+option(SERVICELIB_ENABLE_CRON "Build the libcron data source" OFF)
 set(SERVICELIB_USERVER_SOURCE_DIR "" CACHE PATH
     "External userver checkout used only for standalone tests and benchmarks")
 
@@ -75,6 +76,53 @@ target_include_directories(servicelib INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_link_libraries(servicelib INTERFACE OpenSSL::Crypto)
+
+if(SERVICELIB_ENABLE_CRON)
+  include(FetchContent)
+  include(cmake/DependencyVersions.cmake)
+  FetchContent_Declare(libcron
+      URL "${SERVICELIB_GITHUB_ARCHIVE_BASE}/PerMalmberg/libcron/archive/refs/tags/${SERVICELIB_LIBCRON_VERSION}.tar.gz"
+      DOWNLOAD_EXTRACT_TIMESTAMP FALSE)
+  FetchContent_Declare(libcron_date
+      URL "${SERVICELIB_GITHUB_ARCHIVE_BASE}/HowardHinnant/date/archive/${SERVICELIB_LIBCRON_DATE_REVISION}.tar.gz"
+      DOWNLOAD_EXTRACT_TIMESTAMP FALSE)
+  FetchContent_GetProperties(libcron)
+  if(NOT libcron_POPULATED)
+    FetchContent_Populate(libcron)
+  endif()
+  FetchContent_GetProperties(libcron_date)
+  if(NOT libcron_date_POPULATED)
+    FetchContent_Populate(libcron_date)
+  endif()
+
+  # libcron v1.3.3 predates the C++20 calendar names and intentionally builds
+  # its own sources as C++17. Keeping it in an object target avoids ambiguous
+  # std::chrono/date symbols while still embedding the pinned implementation
+  # into the Cron component.
+  add_library(servicelib_libcron_objects OBJECT
+      ${libcron_SOURCE_DIR}/libcron/src/CronClock.cpp
+      ${libcron_SOURCE_DIR}/libcron/src/CronData.cpp
+      ${libcron_SOURCE_DIR}/libcron/src/CronRandomization.cpp
+      ${libcron_SOURCE_DIR}/libcron/src/CronSchedule.cpp
+      ${libcron_SOURCE_DIR}/libcron/src/Task.cpp)
+  set_target_properties(servicelib_libcron_objects PROPERTIES
+      CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES CXX_EXTENSIONS NO)
+  target_compile_definitions(servicelib_libcron_objects PRIVATE
+      HAS_UNCAUGHT_EXCEPTIONS)
+  target_include_directories(servicelib_libcron_objects SYSTEM PRIVATE
+      ${libcron_SOURCE_DIR}/libcron/include
+      ${libcron_date_SOURCE_DIR}/include)
+
+  add_library(servicelib_cron STATIC
+      src/datasource/cron/libcron.cpp
+      $<TARGET_OBJECTS:servicelib_libcron_objects>)
+  add_library(servicelib::cron ALIAS servicelib_cron)
+  target_compile_features(servicelib_cron PUBLIC cxx_std_20)
+  target_include_directories(servicelib_cron SYSTEM PRIVATE
+      ${libcron_SOURCE_DIR}/libcron/include
+      ${libcron_date_SOURCE_DIR}/include)
+  target_link_libraries(servicelib_cron PUBLIC servicelib PRIVATE userver-core)
+endif()
 
 if(SERVICELIB_BUILD_TESTS OR SERVICELIB_BUILD_BENCHMARKS)
   include(CTest)
@@ -135,6 +183,11 @@ if(SERVICELIB_BUILD_TESTS)
       tests/config_loader_test.cpp)
   servicelib_add_test(servicelib_schedule_test
       tests/schedule_test.cpp)
+  if(SERVICELIB_ENABLE_CRON)
+    servicelib_add_test(servicelib_cron_test
+        tests/cron_test.cpp
+        servicelib::cron)
+  endif()
   servicelib_add_test(servicelib_status_test
       tests/status_test.cpp)
   servicelib_add_test(servicelib_tracing_test
