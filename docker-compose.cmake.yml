@@ -13,6 +13,11 @@ services:
       CCACHE_COMPILERCHECK: content
       CCACHE_MAXSIZE: ${CCACHE_MAXSIZE:-20G}
       CPM_SOURCE_CACHE: /var/cache/cpm
+      GIT_CONFIG_COUNT: ${GIT_CONFIG_COUNT:-0}
+      GIT_CONFIG_KEY_0: ${GIT_CONFIG_KEY_0:-}
+      GIT_CONFIG_VALUE_0: ${GIT_CONFIG_VALUE_0:-}
+      GIT_CONFIG_KEY_1: ${GIT_CONFIG_KEY_1:-}
+      GIT_CONFIG_VALUE_1: ${GIT_CONFIG_VALUE_1:-}
     volumes:
       - .:/workspace
       - cppservicelib-build:/workspace/build
