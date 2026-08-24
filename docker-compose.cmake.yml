@@ -23,7 +23,7 @@ services:
       - /bin/bash
       - -lc
       - >-
-        ./scripts/run_with_progress.sh "Debug configure" cmake --preset docker
+        ./scripts/run_with_progress.sh "Debug configure" cmake --preset docker $${CMAKE_CONFIGURE_EXTRA_ARGS:-}
         && ./scripts/run_with_progress.sh "Debug build" cmake --build --preset docker
         && ./scripts/run_with_progress.sh "Test suite" ctest --preset docker
 
