@@ -31,6 +31,7 @@ for profile in "${profiles[@]}"; do
   [[ -f "$profile" ]] || continue
   effective_profile="$temporary_dir/$(basename "$profile")"
   cp "$profile" "$effective_profile"
+  cat "$root/conan/userver-options.generated.profile" >>"$effective_profile"
   cat >>"$effective_profile" <<EOF
 
 [replace_requires]

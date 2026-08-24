@@ -38,6 +38,7 @@ version() {
 effective_profile="$output_dir/servicegen-userver.profile"
 mkdir -p "$output_dir"
 cp "$profile" "$effective_profile"
+cat "$root/conan/userver-options.generated.profile" >>"$effective_profile"
 cat >>"$effective_profile" <<EOF
 
 [replace_requires]
