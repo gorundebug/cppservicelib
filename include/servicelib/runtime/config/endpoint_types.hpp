@@ -8,6 +8,7 @@
 #pragma once
 
 #include <functional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <variant>
@@ -333,6 +334,9 @@ inline CronEndpointConfig Parse(
   result.enabled = value["enabled"].As<bool>(false);
   result.schedule = value["schedule"].As<std::string>("");
   result.timezone = value["timezone"].As<std::string>("UTC");
+  if (result.timezone != "UTC") {
+    throw std::invalid_argument("scheduled endpoint timezone must be UTC");
+  }
   result.overlapPolicy =
       value["overlapPolicy"].As<servicelib::api::ScheduleOverlapPolicy>(
           servicelib::api::ScheduleOverlapPolicy::kSkip);
@@ -362,6 +366,9 @@ inline TemporalEndpointConfig Parse(
   result.schedule = value["schedule"].As<std::string>("");
   result.scheduleId = value["scheduleId"].As<std::string>("");
   result.timezone = value["timezone"].As<std::string>("UTC");
+  if (result.timezone != "UTC") {
+    throw std::invalid_argument("scheduled endpoint timezone must be UTC");
+  }
   result.overlapPolicy =
       value["overlapPolicy"].As<servicelib::api::ScheduleOverlapPolicy>(
           servicelib::api::ScheduleOverlapPolicy::kSkip);

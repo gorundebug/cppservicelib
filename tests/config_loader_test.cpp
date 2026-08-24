@@ -311,7 +311,7 @@ cronEndpoint:
   idDataConnector: 31
   enabled: true
   schedule: "0 * * * *"
-  timezone: Europe/Moscow
+  timezone: UTC
   overlapPolicy: Skip
   missedRunPolicy: FireOnce
 temporalEndpoint:
@@ -361,6 +361,17 @@ link:
   ASSERT_TRUE(link.callSemantics.has_value());
   ASSERT_TRUE(link.callSemantics->durableCall.has_value());
   EXPECT_EQ(link.callSemantics->durableCall->idDataConnector, 32);
+}
+
+UTEST(ConfigLoader, RejectsNonUtcScheduledEndpointTimezone) {
+  const auto yaml = userver::formats::yaml::FromString(R"(
+schedule: "0 * * * *"
+timezone: Europe/Moscow
+)");
+  EXPECT_THROW(yaml.As<servicelib::config::CronEndpointConfig>(),
+               std::invalid_argument);
+  EXPECT_THROW(yaml.As<servicelib::config::TemporalEndpointConfig>(),
+               std::invalid_argument);
 }
 
 UTEST(ConfigLoader, ValidatesEndpointAndDurableConnectorTypes) {
