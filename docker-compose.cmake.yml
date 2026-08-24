@@ -4,8 +4,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.cmake
+      extra_hosts:
+        - "host.docker.internal:host-gateway"
       additional_contexts:
         userver-source: ${USERVER_SOURCE_CONTEXT:-https://github.com/userver-framework/userver.git#c9f77729c0edce7e423def2d4a4450aa7fc9d259}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     working_dir: /workspace
     environment:
       CCACHE_DIR: /ccache
