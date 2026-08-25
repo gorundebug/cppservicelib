@@ -123,8 +123,7 @@ constexpr userver::utils::TrivialBiMap kCallSemanticsMap = [](auto selector) {
       .Case("FunctionCall", CallSemantics::kFunctionCall)
       .Case("TaskPool", CallSemantics::kTaskPool)
       .Case("PriorityTaskPool", CallSemantics::kPriorityTaskPool)
-      .Case("ParallelCall", CallSemantics::kParallelCall)
-      .Case("DurableCall", CallSemantics::kDurableCall);
+      .Case("ParallelCall", CallSemantics::kParallelCall);
 };
 
 inline CallSemantics Parse(const userver::formats::yaml::Value& value,

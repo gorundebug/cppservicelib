@@ -94,7 +94,7 @@ class TemporalTopologyConfig final : public servicelib::config::IConfig {
     return {};
   }
   std::vector<const servicelib::config::LinkConfig*> GetLinks() const override {
-    return {&durableLink};
+    return {};
   }
   std::vector<const servicelib::config::ModuleConfig*> GetModules()
       const override {
@@ -108,7 +108,6 @@ class TemporalTopologyConfig final : public servicelib::config::IConfig {
   servicelib::config::TemporalDataConnectorConfig temporalConnector;
   servicelib::config::CronEndpointConfig cronEndpoint;
   servicelib::config::TemporalEndpointConfig temporalEndpoint;
-  servicelib::config::LinkConfig durableLink;
 };
 
 TestConfig MakeConfig(userver::formats::parse::To<TestConfig>) {
@@ -290,7 +289,7 @@ functionCallLink:
   EXPECT_TRUE(functionCallLink.callSemantics->functionCall->async);
 }
 
-UTEST(ConfigLoader, ParsesCronTemporalAndDurableCallContracts) {
+UTEST(ConfigLoader, ParsesCronAndTemporalEndpointContracts) {
   const auto yaml = userver::formats::yaml::FromString(R"(
 cronConnector:
   id: 31
@@ -329,11 +328,6 @@ temporalEndpoint:
   activityStartToCloseTimeout: 10000
   activityHeartbeatTimeout: 1000
   maximumAttempts: 5
-link:
-  from: 51
-  to: 52
-  callSemantics: DurableCall
-  idDataConnector: 32
 )");
 
   const auto cronConnector =
@@ -357,10 +351,6 @@ link:
   EXPECT_EQ(temporalEndpoint.taskQueue, "automation");
   EXPECT_EQ(temporalEndpoint.maximumAttempts, 5);
 
-  const auto link = yaml["link"].As<servicelib::config::LinkConfig>();
-  ASSERT_TRUE(link.callSemantics.has_value());
-  ASSERT_TRUE(link.callSemantics->durableCall.has_value());
-  EXPECT_EQ(link.callSemantics->durableCall->idDataConnector, 32);
 }
 
 UTEST(ConfigLoader, RejectsNonUtcScheduledEndpointTimezone) {
@@ -374,7 +364,7 @@ timezone: Europe/Moscow
                std::invalid_argument);
 }
 
-UTEST(ConfigLoader, ValidatesEndpointAndDurableConnectorTypes) {
+UTEST(ConfigLoader, ValidatesScheduledEndpointConnectorTypes) {
   TemporalTopologyConfig config;
   config.cronConnector.id = 31;
   config.cronConnector.name = "local-scheduler";
@@ -386,16 +376,7 @@ UTEST(ConfigLoader, ValidatesEndpointAndDurableConnectorTypes) {
   config.temporalEndpoint.id = 42;
   config.temporalEndpoint.name = "durable-trigger";
   config.temporalEndpoint.idDataConnector = 32;
-  config.durableLink.from = 51;
-  config.durableLink.to = 52;
-  config.durableLink.callSemantics = servicelib::config::MakeCallSemanticsGroup(
-      servicelib::api::CallSemantics::kDurableCall, {}, 0, false, 32);
-
   EXPECT_NO_THROW(servicelib::config::RuntimeConfig{config});
-
-  config.durableLink.callSemantics->durableCall->idDataConnector = 31;
-  EXPECT_THROW(servicelib::config::RuntimeConfig{config}, std::runtime_error);
-  config.durableLink.callSemantics->durableCall->idDataConnector = 32;
   config.cronEndpoint.idDataConnector = 32;
   EXPECT_THROW(servicelib::config::RuntimeConfig{config}, std::runtime_error);
 }
