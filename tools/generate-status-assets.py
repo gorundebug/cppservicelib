@@ -36,6 +36,11 @@ def main() -> None:
         "",
         "#include <string_view>",
         "",
+        "#if defined(__GNUC__)",
+        "#pragma GCC diagnostic push",
+        '#pragma GCC diagnostic ignored "-Woverlength-strings"',
+        "#endif",
+        "",
         "namespace servicelib::status::web {",
         "",
     ]
@@ -52,6 +57,10 @@ def main() -> None:
             ]
         )
     lines.append("}  // namespace servicelib::status::web")
+    lines.append("")
+    lines.append("#if defined(__GNUC__)")
+    lines.append("#pragma GCC diagnostic pop")
+    lines.append("#endif")
     lines.append("")
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT.write_text("\n".join(lines), encoding="utf-8")
