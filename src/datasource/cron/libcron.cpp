@@ -164,8 +164,10 @@ struct Endpoint::Impl final {
                 if (running) running->store(false, std::memory_order_release);
               }
             } guard{ownsRunning ? &running : nullptr};
-            auto context = MessageContext{}.withStreamId(
-                userver::utils::generators::GenerateUuidV7());
+            auto context = ApplyDataSourceEndpointTracing(
+                MessageContext{}.withStreamId(
+                    userver::utils::generators::GenerateUuidV7()),
+                environment, endpointId);
             const auto started = metrics.requestStart();
             std::exception_ptr error;
             try {

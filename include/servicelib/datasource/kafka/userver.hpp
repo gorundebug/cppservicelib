@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -15,9 +16,11 @@
 #include <userver/engine/async.hpp>
 #include <userver/engine/task/task_with_result.hpp>
 #include <userver/kafka/consumer_scope.hpp>
+#include <userver/kafka/headers.hpp>
 
 #include <servicelib/datasource/localsource/custom.hpp>
 #include <servicelib/runtime/detail/kafka_admin.hpp>
+#include <servicelib/runtime/detail/kafka_context.hpp>
 
 namespace servicelib::datasource::kafka {
 
@@ -27,19 +30,24 @@ class ConsumerMessage final {
  public:
   ConsumerMessage(std::string key, std::string value, std::string topic,
                   std::uint32_t partition, std::int64_t offset,
-                  std::function<void()> commit = {})
+                  std::function<void()> commit = {},
+                  detail::KafkaHeaders headers = {})
       : key_(std::move(key)),
         value_(std::move(value)),
         topic_(std::move(topic)),
         partition_(partition),
         offset_(offset),
-        commit_(std::move(commit)) {}
+        commit_(std::move(commit)),
+        headers_(std::move(headers)) {}
 
   [[nodiscard]] const std::string& key() const noexcept { return key_; }
   [[nodiscard]] const std::string& value() const noexcept { return value_; }
   [[nodiscard]] const std::string& topic() const noexcept { return topic_; }
   [[nodiscard]] std::uint32_t partition() const noexcept { return partition_; }
   [[nodiscard]] std::int64_t offset() const noexcept { return offset_; }
+  [[nodiscard]] const detail::KafkaHeaders& headers() const noexcept {
+    return headers_;
+  }
 
   // userver exposes assignment-level asynchronous commit. Unlike Sarama,
   // per-message MarkMessage(metadata) is not available in its public API.
@@ -54,6 +62,7 @@ class ConsumerMessage final {
   std::uint32_t partition_{};
   std::int64_t offset_{};
   std::function<void()> commit_;
+  detail::KafkaHeaders headers_;
 };
 
 class ConsumerClient {
@@ -84,15 +93,29 @@ class UserverConsumerClient final : public ConsumerClient {
         std::string topic;
         std::uint32_t partition{};
         std::int64_t offset{};
+        detail::KafkaHeaders headers;
       };
       std::map<std::uint32_t, std::vector<QueuedMessage>> partitions;
       for (const auto& message : batch) {
         const auto partition =
             static_cast<std::uint32_t>(message.GetPartition());
-        partitions[partition].push_back(
-            {std::string{message.GetKey()},
-             std::string{message.GetPayload()}, message.GetTopic(), partition,
-             message.GetOffset()});
+        detail::KafkaHeaders headers;
+        for (const auto header : message.GetHeaders()) {
+          std::string name{header.name.data(), header.name.size()};
+          std::transform(name.begin(), name.end(), name.begin(),
+                         [](unsigned char value) {
+                           return static_cast<char>(std::tolower(value));
+                         });
+          if (name == "x-stream-id" || name == "x-trace" ||
+              name == "traceparent" || name == "tracestate" ||
+              name == "baggage") {
+            headers[std::move(name)] = std::string{header.value};
+          }
+        }
+        partitions[partition].push_back({
+            std::string{message.GetKey()}, std::string{message.GetPayload()},
+            message.GetTopic(), partition, message.GetOffset(),
+            std::move(headers)});
       }
 
       std::vector<userver::engine::TaskWithResult<bool>> tasks;
@@ -111,7 +134,8 @@ class UserverConsumerClient final : public ConsumerClient {
                     message.offset, [commitRequested] {
                       commitRequested->store(true,
                                              std::memory_order_release);
-                    }});
+                    },
+                    std::move(message.headers)});
                 commit = commit || commitRequested->load(
                                        std::memory_order_acquire);
               }
@@ -146,7 +170,9 @@ class ProducerAdapter final
 
   void start(Context, Consumer consumer) override {
     client_.start([consumer = std::move(consumer)](ConsumerMessage message) {
-      consumer(MessageContext{},
+      auto context =
+          servicelib::detail::ContextFromKafkaHeaders(message.headers());
+      consumer(std::move(context),
                Payload<ConsumerMessage>::make(std::move(message)));
     });
   }

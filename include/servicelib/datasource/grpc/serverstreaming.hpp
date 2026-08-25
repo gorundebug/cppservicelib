@@ -66,7 +66,9 @@ class ServerStreamingEndpoint final
   template <typename Writer>
   ::grpc::Status handle(userver::ugrpc::server::CallContext& call, Req&& value,
                         Writer& writer) {
-    handle(messageContext(call, this->tracingEnabled()), value, writer);
+    handle(this->applyEndpointTracing(
+               messageContext(call, this->tracingEnabled())),
+           value, writer);
     return ::grpc::Status::OK;
   }
 };

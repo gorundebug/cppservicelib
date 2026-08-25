@@ -72,7 +72,9 @@ class BidirectionalStreamingEndpoint final
   template <typename ReaderWriter>
   ::grpc::Status handle(userver::ugrpc::server::CallContext& call,
                         ReaderWriter& stream) {
-    handle(messageContext(call, this->tracingEnabled()), stream);
+    handle(this->applyEndpointTracing(
+               messageContext(call, this->tracingEnabled())),
+           stream);
     return ::grpc::Status::OK;
   }
 };

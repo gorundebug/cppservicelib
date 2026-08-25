@@ -204,9 +204,9 @@ class UserverEndpoint final : public IUserverEndpoint {
       const userver::server::http::HttpRequest& request) override {
     auto* const tracingEngine = environment_.getTracing();
     const bool samplingRequested =
-        tracingEngine != nullptr &&
-        (!request.GetHeader("X-Trace").empty() ||
-         tracing::SampledTraceParent(request.GetHeader("traceparent")));
+        endpointConfig().tracingEnabled ||
+        !request.GetHeader("X-Trace").empty() ||
+        tracing::SampledTraceParent(request.GetHeader("traceparent"));
     // userver treats a root span with no incoming trace flags as sampled.
     // Override that default before any downstream client can propagate it.
     if (tracingEngine) {

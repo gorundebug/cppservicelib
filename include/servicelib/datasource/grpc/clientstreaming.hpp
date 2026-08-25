@@ -78,7 +78,9 @@ class ClientStreamingEndpoint final
 
   template <typename Reader>
   Res handle(userver::ugrpc::server::CallContext& call, Reader& reader) {
-    return handle(messageContext(call, this->tracingEnabled()), reader);
+    return handle(this->applyEndpointTracing(
+                      messageContext(call, this->tracingEnabled())),
+                  reader);
   }
 };
 

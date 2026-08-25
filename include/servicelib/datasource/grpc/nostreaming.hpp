@@ -72,7 +72,9 @@ class NoStreamingEndpoint final : public Endpoint<Req, Res, T, R, Handler, E> {
   }
 
   Res handle(userver::ugrpc::server::CallContext& call, Req&& value) {
-    return handle(messageContext(call, this->tracingEnabled()), value);
+    return handle(this->applyEndpointTracing(
+                      messageContext(call, this->tracingEnabled())),
+                  value);
   }
 };
 

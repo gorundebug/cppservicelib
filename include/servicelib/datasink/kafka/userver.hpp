@@ -11,12 +11,14 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <userver/concurrent/background_task_storage.hpp>
 #include <userver/components/component_context.hpp>
 #include <userver/components/statistics_storage.hpp>
 #include <userver/kafka/impl/broker_secrets.hpp>
 #include <userver/kafka/impl/configuration.hpp>
+#include <userver/kafka/headers.hpp>
 #include <userver/kafka/producer.hpp>
 #include <userver/utils/statistics/entry.hpp>
 #include <userver/utils/statistics/storage.hpp>
@@ -26,6 +28,7 @@
 #include <servicelib/runtime/config/dataconnector_types.hpp>
 #include <servicelib/runtime/config/endpoint_types.hpp>
 #include <servicelib/runtime/datasink.hpp>
+#include <servicelib/runtime/detail/kafka_context.hpp>
 #include <servicelib/runtime/environment/environment.hpp>
 #include <servicelib/runtime/environment/tracing/tracing.hpp>
 #include <servicelib/runtime/detail/kafka_admin.hpp>
@@ -51,6 +54,11 @@ class ProducerClient {
   virtual DeliveryResult send(std::string topic, std::string key,
                               std::string value,
                               std::optional<std::uint32_t> partition) = 0;
+  virtual DeliveryResult sendWithHeaders(
+      std::string topic, std::string key, std::string value,
+      std::optional<std::uint32_t> partition, const detail::KafkaHeaders&) {
+    return send(std::move(topic), std::move(key), std::move(value), partition);
+  }
 };
 
 class UserverProducerClient final : public ProducerClient {
@@ -80,9 +88,22 @@ class UserverProducerClient final : public ProducerClient {
 
   DeliveryResult send(std::string topic, std::string key, std::string value,
                       std::optional<std::uint32_t> partition) override {
+    return sendWithHeaders(std::move(topic), std::move(key), std::move(value),
+                           partition, {});
+  }
+
+  DeliveryResult sendWithHeaders(
+      std::string topic, std::string key, std::string value,
+      std::optional<std::uint32_t> partition,
+      const detail::KafkaHeaders& headers) override {
     DeliveryResult result{partition, std::nullopt, {}};
     try {
-      producer_.Send(topic, key, value, partition);
+      std::vector<userver::kafka::HeaderView> views;
+      views.reserve(headers.size());
+      for (const auto& [name, headerValue] : headers) {
+        views.push_back({name, headerValue});
+      }
+      producer_.Send(topic, key, value, partition, views);
     } catch (...) {
       result.error = std::current_exception();
     }
@@ -263,6 +284,8 @@ class Endpoint final {
     const auto startedAt = metrics_.requestStart();
     std::exception_ptr error;
     try {
+      detail::KafkaHeaders headers;
+      detail::InjectKafkaContext(context, headers);
       SinkMessage<R> message{
           topic_, context,
           [this](MessageContext resultContext, R result) {
@@ -271,10 +294,12 @@ class Endpoint final {
           [this, partitionPayload = payload]() {
             return handlerPartition(partitionPayload.get());
           },
-          [this](std::string key, std::string value,
+          [this, headers = std::move(headers)](
+                 std::string key, std::string value,
                  std::optional<std::uint32_t> selected) {
-            return producer_.send(topic_, std::move(key),
-                                  std::move(value), selected);
+            return producer_.sendWithHeaders(topic_, std::move(key),
+                                             std::move(value), selected,
+                                             headers);
           },
           tasks_};
       handler_.consumeMessage(context, streamContext_, begin->state,

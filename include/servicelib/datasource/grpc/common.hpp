@@ -543,6 +543,12 @@ class Endpoint : public IEndpoint {
     return environment_.getTracing() != nullptr;
   }
 
+  [[nodiscard]] MessageContext applyEndpointTracing(
+      MessageContext context) const {
+    return ApplyDataSourceEndpointTracing(std::move(context), environment_,
+                                          endpointId_);
+  }
+
  private:
   static std::string resolveStreamName(
       const IServiceEnvironment& environment, int streamConfigId) {
