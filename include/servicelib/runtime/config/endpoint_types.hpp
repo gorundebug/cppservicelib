@@ -138,6 +138,8 @@ struct TemporalEndpointConfig {
   bool tracingEnabled{};
   bool enabled{};
   std::string taskQueue;
+  servicelib::api::TemporalExecutionType temporalExecutionType{
+      servicelib::api::TemporalExecutionType::kActivity};
   std::string schedule;
   std::string scheduleId;
   std::string timezone{"UTC"};
@@ -379,6 +381,10 @@ inline TemporalEndpointConfig Parse(
   result.tracingEnabled = value["tracingEnabled"].As<bool>(false);
   result.enabled = value["enabled"].As<bool>(false);
   result.taskQueue = value["taskQueue"].As<std::string>("");
+  result.temporalExecutionType =
+      value["temporalExecutionType"]
+          .As<servicelib::api::TemporalExecutionType>(
+              servicelib::api::TemporalExecutionType::kActivity);
   result.schedule = value["schedule"].As<std::string>("");
   result.scheduleId = value["scheduleId"].As<std::string>("");
   result.timezone = value["timezone"].As<std::string>("UTC");
@@ -406,6 +412,7 @@ inline TemporalEndpointConfig Parse(
                                     "tracingEnabled",
                                     "enabled",
                                     "taskQueue",
+                                    "temporalExecutionType",
                                     "schedule",
                                     "scheduleId",
                                     "timezone",

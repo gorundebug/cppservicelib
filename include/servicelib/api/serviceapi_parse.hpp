@@ -282,6 +282,17 @@ inline ScheduleMissedRunPolicy Parse(const userver::formats::yaml::Value& value,
   return userver::utils::ParseFromValueString(value, kScheduleMissedRunPolicyMap);
 }
 
+constexpr userver::utils::TrivialBiMap kTemporalExecutionTypeMap = [](auto selector) {
+  return selector()
+      .Case("Activity", TemporalExecutionType::kActivity)
+      .Case("Workflow", TemporalExecutionType::kWorkflow);
+};
+
+inline TemporalExecutionType Parse(const userver::formats::yaml::Value& value,
+                    userver::formats::parse::To<TemporalExecutionType>) {
+  return userver::utils::ParseFromValueString(value, kTemporalExecutionTypeMap);
+}
+
 constexpr userver::utils::TrivialBiMap kTypeDefinitionFormatMap = [](auto selector) {
   return selector()
       .Case("Undefined", TypeDefinitionFormat::kUndefined)
