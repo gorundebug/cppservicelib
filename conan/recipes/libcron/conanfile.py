@@ -31,7 +31,7 @@ class LibcronConan(ConanFile):
 
     def source(self):
         base = (
-            os.getenv("SERVICEGEN_GITHUB_RAW_URL") or "https://github.com"
+            os.getenv("DEPENDENCY_GITHUB_RAW_URL") or "https://github.com"
         ).rstrip("/")
         sources = self.conan_data["sources"][str(self.version)]
         get(

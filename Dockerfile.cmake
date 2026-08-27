@@ -4,21 +4,21 @@ FROM userver-source AS userver-source
 FROM --platform=$TARGETPLATFORM ubuntu:24.04
 
 ARG TARGETARCH
-ARG SERVICEGEN_APT_UBUNTU_ARCHIVE_URL=
-ARG SERVICEGEN_APT_UBUNTU_SECURITY_URL=
-ARG SERVICEGEN_APT_UBUNTU_PORTS_URL=
-ARG SERVICEGEN_CONAN_REMOTE_URL=
+ARG DEPENDENCY_APT_UBUNTU_ARCHIVE_URL=
+ARG DEPENDENCY_APT_UBUNTU_SECURITY_URL=
+ARG DEPENDENCY_APT_UBUNTU_PORTS_URL=
+ARG DEPENDENCY_CONAN_REMOTE_URL=
 ARG PIP_INDEX_URL=https://pypi.org/simple
 ARG PIP_TRUSTED_HOST=
-RUN if [ -n "$SERVICEGEN_APT_UBUNTU_ARCHIVE_URL$SERVICEGEN_APT_UBUNTU_SECURITY_URL$SERVICEGEN_APT_UBUNTU_PORTS_URL" ]; then \
+RUN if [ -n "$DEPENDENCY_APT_UBUNTU_ARCHIVE_URL$DEPENDENCY_APT_UBUNTU_SECURITY_URL$DEPENDENCY_APT_UBUNTU_PORTS_URL" ]; then \
       find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) -exec sed -i \
-        -e "s|http://archive.ubuntu.com/ubuntu|$SERVICEGEN_APT_UBUNTU_ARCHIVE_URL|g" \
-        -e "s|http://security.ubuntu.com/ubuntu|$SERVICEGEN_APT_UBUNTU_SECURITY_URL|g" \
-        -e "s|http://ports.ubuntu.com/ubuntu-ports|$SERVICEGEN_APT_UBUNTU_PORTS_URL|g" {} +; \
+        -e "s|http://archive.ubuntu.com/ubuntu|$DEPENDENCY_APT_UBUNTU_ARCHIVE_URL|g" \
+        -e "s|http://security.ubuntu.com/ubuntu|$DEPENDENCY_APT_UBUNTU_SECURITY_URL|g" \
+        -e "s|http://ports.ubuntu.com/ubuntu-ports|$DEPENDENCY_APT_UBUNTU_PORTS_URL|g" {} +; \
     fi
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Etc/UTC
-ENV SERVICEGEN_CONAN_REMOTE_URL=${SERVICEGEN_CONAN_REMOTE_URL}
+ENV DEPENDENCY_CONAN_REMOTE_URL=${DEPENDENCY_CONAN_REMOTE_URL}
 
 COPY docker/userver-packages-ubuntu-24.04.txt /tmp/userver-packages.txt
 

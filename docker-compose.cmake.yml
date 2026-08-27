@@ -7,10 +7,10 @@ services:
       extra_hosts:
         - "host.docker.internal:host-gateway"
       args:
-        SERVICEGEN_APT_UBUNTU_ARCHIVE_URL: ${SERVICEGEN_APT_UBUNTU_ARCHIVE_URL:-}
-        SERVICEGEN_APT_UBUNTU_SECURITY_URL: ${SERVICEGEN_APT_UBUNTU_SECURITY_URL:-}
-        SERVICEGEN_APT_UBUNTU_PORTS_URL: ${SERVICEGEN_APT_UBUNTU_PORTS_URL:-}
-        SERVICEGEN_CONAN_REMOTE_URL: ${SERVICEGEN_CONAN_REMOTE_URL:-}
+        DEPENDENCY_APT_UBUNTU_ARCHIVE_URL: ${DEPENDENCY_APT_UBUNTU_ARCHIVE_URL:-}
+        DEPENDENCY_APT_UBUNTU_SECURITY_URL: ${DEPENDENCY_APT_UBUNTU_SECURITY_URL:-}
+        DEPENDENCY_APT_UBUNTU_PORTS_URL: ${DEPENDENCY_APT_UBUNTU_PORTS_URL:-}
+        DEPENDENCY_CONAN_REMOTE_URL: ${DEPENDENCY_CONAN_REMOTE_URL:-}
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
         PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-}
       additional_contexts:
@@ -23,7 +23,7 @@ services:
       CCACHE_BASEDIR: /workspace
       CCACHE_COMPILERCHECK: content
       CCACHE_MAXSIZE: ${CCACHE_MAXSIZE:-20G}
-      SERVICEGEN_CONAN_REMOTE_URL: ${SERVICEGEN_CONAN_REMOTE_URL:-}
+      DEPENDENCY_CONAN_REMOTE_URL: ${DEPENDENCY_CONAN_REMOTE_URL:-}
       PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
       PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-}
       GIT_CONFIG_COUNT: ${GIT_CONFIG_COUNT:-0}
@@ -35,7 +35,7 @@ services:
       - .:/workspace
       - cppservicelib-build:/workspace/build
       - cppservicelib-ccache:/ccache
-      - ${SERVICEGEN_CONAN_HOME:-cppservicelib-conan2}:/conan
+      - ${DEPENDENCY_CONAN_HOME:-cppservicelib-conan2}:/conan
     command:
       - /bin/bash
       - -lc
