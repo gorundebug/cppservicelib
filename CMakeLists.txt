@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(servicelib VERSION 0.2.14 LANGUAGES CXX)
+project(servicelib VERSION 0.2.15 LANGUAGES CXX)
 
 set(FETCHCONTENT_UPDATES_DISCONNECTED ON CACHE BOOL "" FORCE)
 
