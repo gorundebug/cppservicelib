@@ -2,6 +2,7 @@
 set -euo pipefail
 
 root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+dependency_retry="$root/scripts/retry-dependency-command.sh"
 source "$root/scripts/conan-cache-guard.sh"
 dependency_conan_cache_guard "$0" "$@"
 userver_dir="${USERVER_SOURCE_DIR:-${SERVICELIB_USERVER_SOURCE_DIR:-/opt/userver}}"
@@ -70,21 +71,15 @@ install -m 0644 "$root/conan/hooks/hook_source_proxy.py" \
 source_download_cache=${CPPSERVICELIB_CONAN_SOURCE_CACHE:-$conan_home/source-download-cache}
 mkdir -p "$source_download_cache"
 
-# Conan keeps remote recipe and package archives in per-reference download
-# directories. An interrupted download may leave a .tgz behind without usable
-# cache state and the next install then fails with "file to download already
-# exists". Unindexed or revision-stale directories can be invisible to
-# `conan cache clean`, so remove their non-critical archives once they are
-# older than one minute. The age guard avoids touching a concurrent download.
-while IFS= read -r orphan_archive; do
-  download_dir=${orphan_archive%/*}
-  rm -rf -- "$download_dir"
-done < <(find "$conan_home/p" -mindepth 3 -maxdepth 3 -type f \
-  -path '*/d/*.tgz' -mmin +1 -print 2>/dev/null || true)
-
-# Indexed download/temp folders are non-critical cache state. Keep recipes,
-# packages, sources, build data and the explicit source-download cache.
-conan cache clean "*" --download --temp >/dev/null
+publish_built_graph() {
+  local graph_file=$1 built_list
+  [[ "${DEPENDENCY_CONAN_PUBLISH:-0}" == "1" ]] || return 0
+  built_list="${graph_file%.json}.built.json"
+  conan list --graph="$graph_file" --graph-binaries=build \
+    --format=json --out-file="$built_list"
+  "$dependency_retry" conan upload --list="$built_list" \
+    --remote=dependency-cache-write --confirm --check
+}
 
 lockfile=${CPPSERVICELIB_CONAN_LOCKFILE:-}
 if [[ -z "$lockfile" ]]; then
@@ -99,12 +94,14 @@ if [[ "$lockfile" != "none" ]]; then
   lock_args=(--lockfile "$lockfile")
 fi
 
+install_graph="$output_dir/conan-install.graph.json"
+
 (
   # Conan defines the consumer source folder from the current directory and
   # writes CMakeUserPresets.json there. Run it from the writable build tree so
   # read-only source mounts remain genuinely read-only.
   cd "$output_dir"
-  conan install --requires="userver/$(version userver)@gorundebug/userver" \
+  "$dependency_retry" conan install --requires="userver/$(version userver)@gorundebug/userver" \
     --requires="librdkafka/$(version librdkafka)" \
     --profile:host "$effective_profile" \
     --profile:build "$effective_profile" \
@@ -130,9 +127,12 @@ fi
     -g CMakeDeps \
     -g CMakeToolchain \
     "${lock_args[@]}" \
+    --format=json \
+    --out-file="$install_graph" \
     --output-folder="$output_dir" \
     "${@:3}"
 )
+publish_built_graph "$install_graph"
 
 toolchain="$output_dir/conan_toolchain.cmake"
 if [[ ! -f "$toolchain" ]]; then
@@ -142,7 +142,9 @@ fi
 generator_dir=$(dirname "$toolchain")
 if [[ "${CPPSERVICELIB_ENABLE_CRON:-False}" == "True" ]]; then
   cron_generator_dir="$output_dir/servicelib"
-  conan install \
+  cron_graph="$cron_generator_dir/conan-install.graph.json"
+  mkdir -p "$cron_generator_dir"
+  "$dependency_retry" conan install \
     --requires="libcron/$(version libcron)@gorundebug/userver" \
     --profile:host "$effective_profile" \
     --profile:build "$effective_profile" \
@@ -150,8 +152,11 @@ if [[ "${CPPSERVICELIB_ENABLE_CRON:-False}" == "True" ]]; then
     -s:b "build_type=$build_type" \
     --build=missing \
     -cc "core.sources:download_cache=$source_download_cache" \
+    --format=json \
+    --out-file="$cron_graph" \
     --output-folder="$cron_generator_dir" \
     -g CMakeDeps
+  publish_built_graph "$cron_graph"
   cat >>"$toolchain" <<EOF
 
 # ServiceLib's optional Cron package is resolved separately from userver's

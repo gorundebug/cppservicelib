@@ -12,6 +12,8 @@ services:
         DEPENDENCY_APT_UBUNTU_SECURITY_URL: ${DEPENDENCY_APT_UBUNTU_SECURITY_URL:-}
         DEPENDENCY_APT_UBUNTU_PORTS_URL: ${DEPENDENCY_APT_UBUNTU_PORTS_URL:-}
         DEPENDENCY_CONAN_REMOTE_URL: ${DEPENDENCY_CONAN_REMOTE_URL:-}
+        DEPENDENCY_CONAN_UPLOAD_URL: ${DEPENDENCY_CONAN_UPLOAD_URL:-}
+        DEPENDENCY_CONAN_PUBLISH: ${DEPENDENCY_CONAN_PUBLISH:-0}
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
         PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-}
       additional_contexts:
@@ -25,6 +27,9 @@ services:
       CCACHE_COMPILERCHECK: content
       CCACHE_MAXSIZE: ${CCACHE_MAXSIZE:-20G}
       DEPENDENCY_CONAN_REMOTE_URL: ${DEPENDENCY_CONAN_REMOTE_URL:-}
+      DEPENDENCY_CONAN_UPLOAD_URL: ${DEPENDENCY_CONAN_UPLOAD_URL:-}
+      DEPENDENCY_CONAN_PUBLISH: ${DEPENDENCY_CONAN_PUBLISH:-0}
+      DEPENDENCY_CONAN_CREDENTIAL_FILE: /run/secrets/dependency_conan_credential
       PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
       PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-}
       GIT_CONFIG_COUNT: ${GIT_CONFIG_COUNT:-0}
@@ -37,13 +42,15 @@ services:
       - cppservicelib-build:/workspace/build
       - cppservicelib-ccache:/ccache
       - ${DEPENDENCY_CONAN_HOME:-cppservicelib-conan2}:/conan
+    secrets:
+      - dependency_conan_credential
     command:
       - /bin/bash
       - -lc
       - >-
         ./scripts/run_with_progress.sh "Conan Debug install" ./scripts/conan-install.sh Debug /workspace/build-conan/debug
-        && conan_toolchain="$$(find /workspace/build-conan/debug -type f -name conan_toolchain.cmake -print -quit)"
-        && test -n "$$conan_toolchain"
+        && conan_toolchain="$$(cat /workspace/build-conan/debug/toolchain.path)"
+        && test -f "$$conan_toolchain"
         && ./scripts/run_with_progress.sh "Debug configure" cmake --fresh --preset docker -DCMAKE_TOOLCHAIN_FILE="$$conan_toolchain" $${CMAKE_CONFIGURE_EXTRA_ARGS:-}
         && ./scripts/run_with_progress.sh "Debug build" cmake --build --preset docker
         && ./scripts/run_with_progress.sh "Test suite" ctest --preset docker
@@ -52,3 +59,7 @@ volumes:
   cppservicelib-build:
   cppservicelib-ccache:
   cppservicelib-conan2:
+
+secrets:
+  dependency_conan_credential:
+    file: ${DEPENDENCY_CONAN_CREDENTIAL_FILE:-/dev/null}

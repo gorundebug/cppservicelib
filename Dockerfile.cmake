@@ -20,16 +20,18 @@ ENV TZ=Etc/UTC
 ENV DEPENDENCY_CONAN_REMOTE_URL=${DEPENDENCY_CONAN_REMOTE_URL}
 
 COPY docker/userver-packages-ubuntu-24.04.txt /tmp/userver-packages.txt
+COPY scripts/retry-dependency-command.sh /usr/local/bin/retry-dependency-command
 
 RUN rm -f /etc/apt/apt.conf.d/docker-clean
 RUN --mount=type=cache,id=servicegen-apt-lists-${TARGETARCH},target=/var/lib/apt/lists,sharing=locked \
     --mount=type=cache,id=servicegen-apt-cache-${TARGETARCH},target=/var/cache/apt,sharing=locked \
-    apt-get update \
-    && xargs apt-get install --yes --no-install-recommends \
-       ca-certificates locales python3-pip \
-       < /tmp/userver-packages.txt \
-    && locale-gen en_US.UTF-8 \
-    && rm -f /tmp/userver-packages.txt
+    retry-dependency-command /bin/sh -c \
+      'apt-get update \
+       && xargs apt-get install --yes --no-install-recommends \
+          ca-certificates locales python3-pip \
+          < /tmp/userver-packages.txt \
+       && locale-gen en_US.UTF-8 \
+       && rm -f /tmp/userver-packages.txt'
 
 RUN python3 -m venv /opt/conan \
     && PIP_TRUSTED_HOST="$PIP_TRUSTED_HOST" \
