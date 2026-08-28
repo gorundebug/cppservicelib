@@ -20,27 +20,10 @@ find_package(OpenSSL REQUIRED)
 option(SERVICELIB_BUILD_TESTS "Build servicelib unit tests" OFF)
 option(SERVICELIB_BUILD_BENCHMARKS "Build servicelib benchmarks" OFF)
 option(SERVICELIB_ENABLE_CRON "Build the libcron data source" OFF)
-set(SERVICELIB_USERVER_SOURCE_DIR "" CACHE PATH
-    "External userver checkout used only for standalone tests and benchmarks")
-
-if((SERVICELIB_BUILD_TESTS OR SERVICELIB_BUILD_BENCHMARKS)
-   AND NOT TARGET userver-core
-   AND SERVICELIB_USERVER_SOURCE_DIR)
-  set(USERVER_CONAN ON CACHE BOOL "" FORCE)
-  set(USERVER_INSTALL OFF CACHE BOOL "" FORCE)
-  set(USERVER_DOWNLOAD_PACKAGES OFF CACHE BOOL "" FORCE)
-  set(USERVER_FEATURE_GRPC ON CACHE BOOL "" FORCE)
-  set(USERVER_FORCE_DOWNLOAD_GRPC OFF CACHE BOOL "" FORCE)
-  set(USERVER_FORCE_DOWNLOAD_PROTOBUF OFF CACHE BOOL "" FORCE)
-  set(USERVER_FEATURE_KAFKA ON CACHE BOOL "" FORCE)
-  set(USERVER_FEATURE_CHAOTIC_EXPERIMENTAL ON CACHE BOOL "" FORCE)
-  add_subdirectory(
-      "${SERVICELIB_USERVER_SOURCE_DIR}"
-      "${CMAKE_BINARY_DIR}/_deps/userver-build"
-      EXCLUDE_FROM_ALL)
-  userver_setup_environment()
-  list(APPEND CMAKE_MODULE_PATH
-      "${SERVICELIB_USERVER_SOURCE_DIR}/cmake")
+if(SERVICELIB_BUILD_TESTS OR SERVICELIB_BUILD_BENCHMARKS OR
+   SERVICELIB_ENABLE_CRON)
+  find_package(jemalloc CONFIG QUIET)
+  find_package(userver CONFIG REQUIRED COMPONENTS core grpc kafka)
 endif()
 
 add_library(servicelib INTERFACE)
@@ -59,7 +42,7 @@ if(SERVICELIB_ENABLE_CRON)
   add_library(servicelib::cron ALIAS servicelib_cron)
   target_compile_features(servicelib_cron PUBLIC cxx_std_20)
   target_link_libraries(servicelib_cron PUBLIC servicelib PRIVATE
-      userver-core libcron::libcron)
+      userver::core libcron::libcron)
 endif()
 
 if(SERVICELIB_BUILD_TESTS OR SERVICELIB_BUILD_BENCHMARKS)
@@ -67,21 +50,21 @@ if(SERVICELIB_BUILD_TESTS OR SERVICELIB_BUILD_BENCHMARKS)
 endif()
 
 if(SERVICELIB_BUILD_TESTS)
-  if(NOT TARGET userver-core)
+  if(NOT TARGET userver::core)
     message(FATAL_ERROR
-        "SERVICELIB_BUILD_TESTS requires the userver-core target")
+        "SERVICELIB_BUILD_TESTS requires the userver::core target")
   endif()
   if(NOT TARGET userver::utest)
     message(FATAL_ERROR
         "SERVICELIB_BUILD_TESTS requires the userver::utest target")
   endif()
-  if(NOT TARGET userver-grpc)
+  if(NOT TARGET userver::grpc)
     message(FATAL_ERROR
-        "SERVICELIB_BUILD_TESTS requires the userver-grpc target")
+        "SERVICELIB_BUILD_TESTS requires the userver::grpc target")
   endif()
-  if(NOT TARGET userver-kafka)
+  if(NOT TARGET userver::kafka)
     message(FATAL_ERROR
-        "SERVICELIB_BUILD_TESTS requires the userver-kafka target")
+        "SERVICELIB_BUILD_TESTS requires the userver::kafka target")
   endif()
   find_package(RdKafka CONFIG REQUIRED)
 
@@ -94,7 +77,7 @@ if(SERVICELIB_BUILD_TESTS)
   function(servicelib_add_test target source)
     add_executable(${target} ${source})
     target_link_libraries(${target} PRIVATE
-        servicelib userver-core userver::utest ${ARGN})
+        servicelib userver::core userver::utest ${ARGN})
     add_google_tests(${target})
   endfunction()
 
@@ -112,10 +95,10 @@ if(SERVICELIB_BUILD_TESTS)
       tests/http_endpoints_test.cpp)
   servicelib_add_test(servicelib_grpc_endpoints_test
       tests/grpc_endpoints_test.cpp
-      userver-grpc)
+      userver::grpc)
   servicelib_add_test(servicelib_custom_kafka_endpoints_test
       tests/custom_kafka_endpoints_test.cpp
-      userver-kafka RdKafka::rdkafka)
+      userver::kafka RdKafka::rdkafka)
   servicelib_add_test(servicelib_operators_test
       tests/operators_compile_test.cpp)
   servicelib_add_test(servicelib_config_loader_test
@@ -136,14 +119,14 @@ if(SERVICELIB_BUILD_TESTS)
 endif()
 
 if(SERVICELIB_BUILD_BENCHMARKS)
-  if(NOT TARGET userver-ubench)
+  if(NOT TARGET userver::ubench)
     message(FATAL_ERROR
-        "SERVICELIB_BUILD_BENCHMARKS requires the userver-ubench target")
+        "SERVICELIB_BUILD_BENCHMARKS requires the userver::ubench target")
   endif()
   add_executable(servicelib_taskpool_benchmark
       benchmarks/taskpool_benchmark.cpp)
   target_link_libraries(servicelib_taskpool_benchmark PRIVATE
-      servicelib userver-ubench)
+      servicelib userver::ubench)
   add_google_benchmark_tests(servicelib_taskpool_benchmark)
 endif()
 

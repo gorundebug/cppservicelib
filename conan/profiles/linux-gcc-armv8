@@ -9,3 +9,5 @@ build_type=Release
 
 [conf]
 tools.cmake.cmaketoolchain:generator=Ninja
+userver/*:tools.cmake.cmaketoolchain:extra_variables={"USERVER_FEATURE_CHAOTIC_EXPERIMENTAL": True}
+userver/*:tools.info.package_id:confs=["tools.cmake.cmaketoolchain:extra_variables"]

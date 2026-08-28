@@ -2,6 +2,8 @@
 set -euo pipefail
 
 root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+source "$root/scripts/conan-cache-guard.sh"
+dependency_conan_cache_guard "$0" "$@"
 userver_dir="${USERVER_SOURCE_DIR:-${SERVICELIB_USERVER_SOURCE_DIR:-/opt/userver}}"
 build_type=${1:-Release}
 output_dir=${2:-$root/build/conan-${build_type,,}}
@@ -35,8 +37,9 @@ version() {
   python3 "$versions_file" "$1"
 }
 
-effective_profile="$output_dir/servicegen-userver.profile"
 mkdir -p "$output_dir"
+output_dir="$(CDPATH= cd -- "$output_dir" && pwd)"
+effective_profile="$output_dir/servicegen-userver.profile"
 cp "$profile" "$effective_profile"
 cat "$root/conan/userver-options.generated.profile" >>"$effective_profile"
 cat >>"$effective_profile" <<EOF
@@ -44,7 +47,7 @@ cat >>"$effective_profile" <<EOF
 [replace_requires]
 boost/*: boost/$(version userver-boost)
 grpc/*: grpc/$(version grpc)
-googleapis/*: googleapis/$(version userver-googleapis)
+googleapis/*: googleapis/$(version userver-googleapis)@gorundebug/userver
 gtest/*: gtest/$(version userver-googletest)
 librdkafka/*: librdkafka/$(version librdkafka)
 opentelemetry-proto/*: opentelemetry-proto/$(version userver-opentelemetry-proto)
@@ -58,6 +61,7 @@ EOF
 
 "$root/scripts/conan-configure-remotes.sh"
 "$root/scripts/conan-export-recipes.sh"
+"$root/scripts/conan-export-userver.sh" "$userver_dir" "$(version userver)"
 
 conan_home=$(conan config home)
 mkdir -p "$conan_home/extensions/hooks"
@@ -95,76 +99,51 @@ if [[ "$lockfile" != "none" ]]; then
   lock_args=(--lockfile "$lockfile")
 fi
 
-conan install "$userver_dir" \
-  --profile:host "$effective_profile" \
-  --profile:build "$effective_profile" \
-  -s:h "build_type=$build_type" \
-  -s:b "build_type=$build_type" \
-  -o "&:with_mongodb=False" \
-  -o "&:with_postgresql=False" \
-  -o "&:with_redis=False" \
-  -o "&:with_clickhouse=False" \
-  -o "&:with_rabbitmq=False" \
-  -o "&:with_sqlite=False" \
-  -o "&:with_s3api=False" \
-  -o "&:with_easy=False" \
-  -o "&:with_grpc=${CPPSERVICELIB_ENABLE_GRPC:-True}" \
-  -o "&:with_kafka=${CPPSERVICELIB_ENABLE_KAFKA:-True}" \
-  -o "&:with_otlp=${CPPSERVICELIB_ENABLE_OTLP:-True}" \
-  -o "&:with_utest=${CPPSERVICELIB_BUILD_TESTS:-True}" \
-  -o "&:with_grpc_reflection=False" \
-  -o "&:with_grpc_protovalidate=False" \
-  --build=missing \
-  -cc "core.sources:download_cache=$source_download_cache" \
-  -c "tools.cmake.cmaketoolchain:user_presets=" \
-  "${lock_args[@]}" \
-  --output-folder="$output_dir" \
-  "${@:3}"
-
-mapfile -t toolchains < <(find "$output_dir" -type f \
-  -name conan_toolchain.cmake -print)
-if [[ "${#toolchains[@]}" -ne 1 ]]; then
-  echo "expected exactly one Conan toolchain below $output_dir, found ${#toolchains[@]}" >&2
-  exit 2
-fi
-generator_dir=$(dirname "${toolchains[0]}")
-preset_file="$generator_dir/CMakePresets.json"
-if [[ ! -f "$preset_file" ]]; then
-  echo "userver Conan preset is missing: $preset_file" >&2
-  exit 2
-fi
-
-# userver's upstream recipe writes its package-derived cache variables only to
-# a preset rooted at the userver checkout. ServiceLib embeds that checkout in a
-# different CMake project, so copy those exact variables into the generated
-# toolchain instead of duplicating or guessing them here.
-python3 - "$preset_file" "${toolchains[0]}" "conan-${build_type,,}" <<'PY'
-import json
-import sys
-
-preset_path, toolchain_path, preset_name = sys.argv[1:]
-with open(preset_path, encoding="utf-8") as source:
-    document = json.load(source)
-preset = next(
-    (item for item in document.get("configurePresets", [])
-     if item.get("name") == preset_name),
-    None,
+(
+  # Conan defines the consumer source folder from the current directory and
+  # writes CMakeUserPresets.json there. Run it from the writable build tree so
+  # read-only source mounts remain genuinely read-only.
+  cd "$output_dir"
+  conan install --requires="userver/$(version userver)@gorundebug/userver" \
+    --requires="librdkafka/$(version librdkafka)" \
+    --profile:host "$effective_profile" \
+    --profile:build "$effective_profile" \
+    -s:h "build_type=$build_type" \
+    -s:b "build_type=$build_type" \
+    -o "userver/*:with_mongodb=False" \
+    -o "userver/*:with_postgresql=False" \
+    -o "userver/*:with_redis=False" \
+    -o "userver/*:with_clickhouse=False" \
+    -o "userver/*:with_rabbitmq=False" \
+    -o "userver/*:with_sqlite=False" \
+    -o "userver/*:with_s3api=False" \
+    -o "userver/*:with_easy=False" \
+    -o "userver/*:with_grpc=True" \
+    -o "userver/*:with_kafka=True" \
+    -o "userver/*:with_otlp=True" \
+    -o "userver/*:with_utest=True" \
+    -o "userver/*:with_grpc_reflection=False" \
+    -o "userver/*:with_grpc_protovalidate=False" \
+    --build=missing \
+    -cc "core.sources:download_cache=$source_download_cache" \
+    -c "tools.cmake.cmaketoolchain:user_presets=$output_dir/CMakeUserPresets.json" \
+    -g CMakeDeps \
+    -g CMakeToolchain \
+    "${lock_args[@]}" \
+    --output-folder="$output_dir" \
+    "${@:3}"
 )
-if preset is None:
-    raise SystemExit(f"Conan configure preset is missing: {preset_name}")
-with open(toolchain_path, "a", encoding="utf-8") as toolchain:
-    toolchain.write("\n# Cache variables emitted by userver's Conan recipe.\n")
-    for name, value in sorted(preset.get("cacheVariables", {}).items()):
-        toolchain.write(
-            f"set({name} {json.dumps(str(value))} CACHE STRING "
-            '"Generated by userver Conan" FORCE)\n'
-        )
-PY
 
+toolchain="$output_dir/conan_toolchain.cmake"
+if [[ ! -f "$toolchain" ]]; then
+  echo "Conan toolchain is missing: $toolchain" >&2
+  exit 2
+fi
+generator_dir=$(dirname "$toolchain")
 if [[ "${CPPSERVICELIB_ENABLE_CRON:-False}" == "True" ]]; then
   cron_generator_dir="$output_dir/servicelib"
   conan install \
-    --requires="libcron/$(version libcron)" \
+    --requires="libcron/$(version libcron)@gorundebug/userver" \
     --profile:host "$effective_profile" \
     --profile:build "$effective_profile" \
     -s:h "build_type=$build_type" \
@@ -173,10 +152,12 @@ if [[ "${CPPSERVICELIB_ENABLE_CRON:-False}" == "True" ]]; then
     -cc "core.sources:download_cache=$source_download_cache" \
     --output-folder="$cron_generator_dir" \
     -g CMakeDeps
-  cat >>"${toolchains[0]}" <<EOF
+  cat >>"$toolchain" <<EOF
 
 # ServiceLib's optional Cron package is resolved separately from userver's
 # upstream Conan recipe, but participates in the same CMake configure.
 list(PREPEND CMAKE_PREFIX_PATH "$cron_generator_dir")
 EOF
 fi
+
+printf '%s\n' "$toolchain" >"$output_dir/toolchain.path"

@@ -8,8 +8,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "SERVICELIB_BUILD_TESTS": "ON",
-        "SERVICELIB_BUILD_BENCHMARKS": "OFF",
-        "SERVICELIB_USERVER_SOURCE_DIR": "$env{USERVER_SOURCE_DIR}"
+        "SERVICELIB_BUILD_BENCHMARKS": "OFF"
       }
     },
     {
@@ -19,8 +18,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "SERVICELIB_BUILD_TESTS": "ON",
-        "SERVICELIB_BUILD_BENCHMARKS": "OFF",
-        "SERVICELIB_USERVER_SOURCE_DIR": "/opt/userver"
+        "SERVICELIB_BUILD_BENCHMARKS": "OFF"
       }
     }
   ],

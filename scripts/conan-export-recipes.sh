@@ -8,5 +8,6 @@ version() {
   python3 "$versions" "$1"
 }
 
-conan export "$root/conan/recipes/googleapis"
-conan export "$root/conan/recipes/libcron" --version "$(version libcron)"
+conan export "$root/conan/recipes/googleapis" --user gorundebug --channel userver
+conan export "$root/conan/recipes/libcron" --version "$(version libcron)" \
+  --user gorundebug --channel userver

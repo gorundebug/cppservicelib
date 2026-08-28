@@ -1,6 +1,5 @@
 ARG DEPENDENCY_DOCKER_REGISTRY=docker.io
 FROM userver-source AS userver-source
-
 FROM --platform=$TARGETPLATFORM ${DEPENDENCY_DOCKER_REGISTRY}/library/ubuntu:24.04
 
 ARG TARGETARCH
@@ -41,7 +40,21 @@ ENV CONAN_HOME=/conan
 ENV PIP_INDEX_URL=${PIP_INDEX_URL}
 ENV PIP_TRUSTED_HOST=${PIP_TRUSTED_HOST}
 
-COPY --from=userver-source / /opt/userver
+COPY --from=userver-source / /tmp/userver-source
+RUN set -eu; \
+    source_dir=/tmp/userver-source; \
+    archive=$(find "$source_dir" -mindepth 1 -maxdepth 1 -type f \( -name context -o -name '*.tar' -o -name '*.tar.gz' -o -name '*.tgz' -o -name '*.tar.xz' \) -print -quit); \
+    if [ -n "$archive" ]; then \
+      mkdir -p /tmp/userver-archive; \
+      tar -xf "$archive" -C /tmp/userver-archive; \
+      source_dir=/tmp/userver-archive; \
+    fi; \
+    manifest=$(find "$source_dir" -type f -name conanfile.py -print -quit); \
+    if [ -z "$manifest" ]; then echo "userver source context has no conanfile.py" >&2; exit 1; fi; \
+    source_dir=${manifest%/conanfile.py}; \
+    mkdir -p /opt/userver; \
+    cp -a "$source_dir/." /opt/userver/; \
+    rm -rf /tmp/userver-source /tmp/userver-archive
 
 WORKDIR /workspace
 
