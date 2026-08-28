@@ -1,7 +1,7 @@
-# syntax=docker/dockerfile:1
+ARG DEPENDENCY_DOCKER_REGISTRY=docker.io
 FROM userver-source AS userver-source
 
-FROM --platform=$TARGETPLATFORM ubuntu:24.04
+FROM --platform=$TARGETPLATFORM ${DEPENDENCY_DOCKER_REGISTRY}/library/ubuntu:24.04
 
 ARG TARGETARCH
 ARG DEPENDENCY_APT_UBUNTU_ARCHIVE_URL=
