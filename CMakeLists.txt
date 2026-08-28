@@ -40,6 +40,7 @@ if(SERVICELIB_ENABLE_CRON)
   add_library(servicelib_cron STATIC
       src/datasource/cron/libcron.cpp)
   add_library(servicelib::cron ALIAS servicelib_cron)
+  set_target_properties(servicelib_cron PROPERTIES EXPORT_NAME cron)
   target_compile_features(servicelib_cron PUBLIC cxx_std_20)
   target_link_libraries(servicelib_cron PUBLIC servicelib PRIVATE
       userver::core libcron::libcron)
@@ -131,6 +132,11 @@ if(SERVICELIB_BUILD_BENCHMARKS)
 endif()
 
 install(TARGETS servicelib EXPORT servicelibTargets)
+if(SERVICELIB_ENABLE_CRON)
+  install(TARGETS servicelib_cron
+      EXPORT servicelibTargets
+      ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+endif()
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(EXPORT servicelibTargets
     FILE servicelibTargets.cmake
