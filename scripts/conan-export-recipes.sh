@@ -11,3 +11,5 @@ version() {
 conan export "$root/conan/recipes/googleapis" --user gorundebug --channel userver
 conan export "$root/conan/recipes/libcron" --version "$(version libcron)" \
   --user gorundebug --channel userver
+conan export "$root/conan/recipes/librdkafka" --version "$(version librdkafka)" \
+  --user gorundebug --channel userver

@@ -257,7 +257,12 @@ class Endpoint final {
   }
   void stop(Context) {
     enabled_.store(false, std::memory_order_release);
-    tasks_.CancelAndWait();
+    // userver::kafka::Producer::Send does not copy the key or payload.  Its
+    // coroutine keeps those buffers alive until librdkafka reports delivery.
+    // Cancelling the wrapper task can therefore release the buffers while the
+    // broker thread is still sending them.  Stop accepting new messages and
+    // drain the already accepted deliveries instead.
+    tasks_.CloseAndWaitDebug();
   }
 
   void consume(MessageContext context, Payload<T> payload) {

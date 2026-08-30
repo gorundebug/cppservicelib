@@ -7,16 +7,22 @@
  */
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <string_view>
+#include <stdexcept>
+#include <unordered_map>
 #include <utility>
 
 #include <servicelib/runtime/context.hpp>
 #include <servicelib/runtime/environment/environment.hpp>
 #include <servicelib/runtime/payload.hpp>
 #include <servicelib/runtime/schedule.hpp>
+#include <userver/engine/single_consumer_event.hpp>
 
 namespace servicelib {
 template <typename T, typename R, typename E, typename Context>
@@ -26,6 +32,66 @@ class InputStream;
 namespace servicelib::datasource::cron {
 
 namespace detail {
+
+class ResultWaiter final {
+ public:
+  enum class Completion { kCompleted, kMissing, kDuplicate };
+
+  struct Pending final {
+    std::atomic<bool> done{false};
+    userver::engine::SingleConsumerEvent completed;
+  };
+
+  std::shared_ptr<Pending> begin(const std::string& streamId) {
+    if (streamId.empty()) throw std::invalid_argument("cron activation has no stream ID");
+    auto pending = std::make_shared<Pending>();
+    std::lock_guard lock(mutex_);
+    if (!pending_.emplace(streamId, pending).second) {
+      throw std::logic_error("duplicate active cron stream ID: " + streamId);
+    }
+    return pending;
+  }
+
+  Completion complete(std::string_view streamId) {
+    std::shared_ptr<Pending> pending;
+    {
+      std::lock_guard lock(mutex_);
+      const auto found = pending_.find(std::string{streamId});
+      if (found == pending_.end()) return Completion::kMissing;
+      pending = found->second;
+    }
+    if (pending->done.exchange(true, std::memory_order_acq_rel)) {
+      return Completion::kDuplicate;
+    }
+    pending->completed.Send();
+    return Completion::kCompleted;
+  }
+
+  void wait(const std::string& streamId,
+            const std::shared_ptr<Pending>& pending) {
+    if (!pending->completed.WaitForEvent()) {
+      erase(streamId, pending);
+      throw std::runtime_error("cron result wait was cancelled");
+    }
+    erase(streamId, pending);
+  }
+
+  void cancel(const std::string& streamId,
+              const std::shared_ptr<Pending>& pending) noexcept {
+    erase(streamId, pending);
+  }
+
+ private:
+  void erase(const std::string& streamId,
+             const std::shared_ptr<Pending>& pending) noexcept {
+    std::lock_guard lock(mutex_);
+    const auto found = pending_.find(streamId);
+    if (found != pending_.end() && found->second == pending) pending_.erase(found);
+  }
+
+  std::mutex mutex_;
+  std::unordered_map<std::string, std::shared_ptr<Pending>> pending_;
+};
 
 template <typename T, typename InputStreamType>
 class ScheduleCollector final {
@@ -60,13 +126,33 @@ class Endpoint final {
                                         InputStream<T, R, E, StreamContext>& input,
                                         Function& function) {
     using InputStreamType = InputStream<T, R, E, StreamContext>;
-    return std::shared_ptr<Endpoint>(new Endpoint(
-        environment, input.getEndpointId(),
-        [input = &input, function = &function](
+    const bool hasResult = input.getResultStream() != nullptr;
+    auto waiter = std::make_shared<detail::ResultWaiter>();
+    auto endpoint = std::shared_ptr<Endpoint>(new Endpoint(
+        environment, input.getEndpointId(), hasResult, waiter,
+        [input = &input, function = &function, waiter, hasResult](
             MessageContext context, Payload<ScheduleTrigger> trigger) {
+          const std::string streamId{context.streamId()};
+          auto pending = hasResult ? waiter->begin(streamId) : nullptr;
           detail::ScheduleCollector<T, InputStreamType> out(*input);
-          (*function)(std::move(context), trigger.get(), std::move(out));
+          try {
+            (*function)(std::move(context), trigger.get(), std::move(out));
+            if (pending) waiter->wait(streamId, pending);
+          } catch (...) {
+            if (pending) waiter->cancel(streamId, pending);
+            throw;
+          }
         }));
+    if (hasResult) {
+      input.setResultConsumer(
+          [endpoint = std::weak_ptr<Endpoint>{endpoint}](MessageContext context,
+                                                         Payload<R>) {
+            if (auto locked = endpoint.lock()) {
+              locked->completeResult(context.streamId());
+            }
+          });
+    }
+    return endpoint;
   }
 
   Endpoint(const Endpoint&) = delete;
@@ -80,7 +166,9 @@ class Endpoint final {
   friend class LibcronDataSource;
   struct Impl;
 
-  Endpoint(IServiceEnvironment& environment, int endpointId, Output output);
+  Endpoint(IServiceEnvironment& environment, int endpointId, bool hasResult,
+           std::shared_ptr<detail::ResultWaiter> waiter, Output output);
+  void completeResult(std::string_view streamId) noexcept;
 
   std::unique_ptr<Impl> impl_;
 };

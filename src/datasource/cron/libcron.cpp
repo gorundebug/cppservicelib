@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <exception>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -21,6 +22,8 @@
 #include <vector>
 
 #include <userver/concurrent/background_task_storage.hpp>
+#include <userver/engine/condition_variable.hpp>
+#include <userver/engine/mutex.hpp>
 #include <userver/utils/periodic_task.hpp>
 #include <userver/utils/uuid7.hpp>
 
@@ -93,10 +96,13 @@ std::string ToLibcronExpression(const std::string& expression) {
 
 struct Endpoint::Impl final {
   Impl(IServiceEnvironment& environmentValue, int endpointIdValue,
+       bool hasResultValue, std::shared_ptr<detail::ResultWaiter> waiterValue,
        Output outputValue)
       : environment(environmentValue),
         endpointId(endpointIdValue),
         endpointName(EndpointConfig(environment, endpointId).name),
+        hasResult(hasResultValue),
+        waiter(std::move(waiterValue)),
         output(std::move(outputValue)),
         metrics(environment.getMetrics(), environment.getLogger(),
                 ConnectorConfig(environment,
@@ -154,10 +160,30 @@ struct Endpoint::Impl final {
       }
       ownsRunning = true;
     }
+    {
+      std::lock_guard lock(activeMutex);
+      if (stopping.load(std::memory_order_acquire)) {
+        if (ownsRunning) running.store(false, std::memory_order_release);
+        return;
+      }
+      ++active;
+    }
     try {
       tasks.CriticalAsyncDetach(
           "servicelib-cron-endpoint",
           [this, scheduledAt, ownsRunning] {
+            struct ActiveGuard final {
+              userver::engine::Mutex& mutex;
+              userver::engine::ConditionVariable& drained;
+              std::size_t& active;
+              ~ActiveGuard() {
+                {
+                  std::lock_guard lock(mutex);
+                  --active;
+                }
+                drained.NotifyAll();
+              }
+            } activeGuard{activeMutex, drained, active};
             struct RunningGuard final {
               std::atomic<bool>* running{};
               ~RunningGuard() {
@@ -168,8 +194,10 @@ struct Endpoint::Impl final {
                 MessageContext{}.withStreamId(
                     userver::utils::generators::GenerateUuidV7()),
                 environment, endpointId);
+            const std::string streamId{context.streamId()};
             const auto started = metrics.requestStart();
             std::exception_ptr error;
+            if (hasResult) metrics.pendingAdd(streamId);
             try {
               output(std::move(context), Payload<ScheduleTrigger>::make(
                   MakeScheduleTrigger(endpointId, endpointName, scheduledAt,
@@ -177,23 +205,43 @@ struct Endpoint::Impl final {
             } catch (...) {
               error = std::current_exception();
             }
+            if (hasResult) metrics.pendingRemove(streamId);
             metrics.requestEnd(started, error);
           });
     } catch (...) {
       if (ownsRunning) running.store(false, std::memory_order_release);
+      {
+        std::lock_guard lock(activeMutex);
+        --active;
+      }
+      drained.NotifyAll();
       throw;
     }
   }
 
-  void stop() noexcept {
+  void stop(const Context& context) noexcept {
     stopping.store(true, std::memory_order_release);
-    tasks.CancelAndWait();
+    bool drainedBeforeDeadline = true;
+    {
+      std::unique_lock lock(activeMutex);
+      if (context.deadline()) {
+        drainedBeforeDeadline = drained.WaitUntil(
+            lock, *context.deadline(), [this] { return active == 0; });
+      } else {
+        static_cast<void>(drained.Wait(lock, [this] { return active == 0; }));
+      }
+    }
+    if (drainedBeforeDeadline) {
+      tasks.CancelAndWait();
+    }
     running.store(false, std::memory_order_release);
   }
 
   IServiceEnvironment& environment;
   int endpointId;
   std::string endpointName;
+  bool hasResult;
+  std::shared_ptr<detail::ResultWaiter> waiter;
   Output output;
   DataSourceEndpointMetrics metrics;
   api::ScheduleOverlapPolicy overlapPolicy{api::ScheduleOverlapPolicy::kSkip};
@@ -203,17 +251,38 @@ struct Endpoint::Impl final {
   std::optional<Clock::time_point> lastScheduled;
   std::atomic<bool> running{false};
   std::atomic<bool> stopping{true};
+  userver::engine::Mutex activeMutex;
+  userver::engine::ConditionVariable drained;
+  std::size_t active{};
   userver::concurrent::BackgroundTaskStorage tasks;
 };
 
 Endpoint::Endpoint(IServiceEnvironment& environment, int endpointId,
-                   Output output)
-    : impl_(std::make_unique<Impl>(environment, endpointId,
-                                  std::move(output))) {}
+                   bool hasResult,
+                   std::shared_ptr<detail::ResultWaiter> waiter, Output output)
+    : impl_(std::make_unique<Impl>(environment, endpointId, hasResult,
+                                  std::move(waiter), std::move(output))) {}
 
 Endpoint::~Endpoint() = default;
 int Endpoint::id() const noexcept { return impl_->endpointId; }
 const std::string& Endpoint::name() const noexcept { return impl_->endpointName; }
+
+void Endpoint::completeResult(std::string_view streamId) noexcept {
+  if (streamId.empty()) {
+    impl_->metrics.missingStreamId();
+    return;
+  }
+  switch (impl_->waiter->complete(streamId)) {
+    case detail::ResultWaiter::Completion::kCompleted:
+      return;
+    case detail::ResultWaiter::Completion::kMissing:
+      impl_->metrics.lateResult(streamId);
+      return;
+    case detail::ResultWaiter::Completion::kDuplicate:
+      impl_->metrics.duplicateMessageId(streamId, streamId);
+      return;
+  }
+}
 
 struct LibcronDataSource::Impl final {
   Impl(IServiceEnvironment& environmentValue, int connectorIdValue)
@@ -285,17 +354,16 @@ void LibcronDataSource::start(Context context) {
   } catch (...) {
     impl_->ticker.Stop();
     impl_->scheduler.clear_schedules();
-    for (const auto& endpoint : impl_->endpoints) endpoint->impl_->stop();
+    for (const auto& endpoint : impl_->endpoints) endpoint->impl_->stop(context);
     throw;
   }
 }
 
 void LibcronDataSource::stop(Context context) {
-  static_cast<void>(context);
   if (!impl_->started) return;
   impl_->ticker.Stop();
   impl_->scheduler.clear_schedules();
-  for (const auto& endpoint : impl_->endpoints) endpoint->impl_->stop();
+  for (const auto& endpoint : impl_->endpoints) endpoint->impl_->stop(context);
   impl_->started = false;
 }
 

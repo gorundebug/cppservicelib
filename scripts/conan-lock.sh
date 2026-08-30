@@ -3,7 +3,16 @@ set -euo pipefail
 
 root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 source "$root/scripts/conan-cache-guard.sh"
+source "$root/scripts/conan-userver-package-args.sh"
 dependency_conan_cache_guard "$0" "$@"
+conan_home=${CONAN_HOME:-${HOME:?HOME is required}/.conan2}
+mkdir -p "$conan_home"
+install -m 0644 "$root/conan/settings_user.yml" "$conan_home/settings_user.yml"
+mkdir -p "$conan_home/extensions/hooks"
+install -m 0644 "$root/conan/hooks/hook_source_proxy.py" \
+  "$conan_home/extensions/hooks/hook_servicegen_source_proxy.py"
+install -m 0644 "$root/conan/hooks/source-proxies.generated.json" \
+  "$conan_home/extensions/hooks/source-proxies.generated.json"
 userver_dir="${USERVER_SOURCE_DIR:-${SERVICELIB_USERVER_SOURCE_DIR:-/opt/userver}}"
 versions="$root/conan/dependencies_generated.py"
 lock_dir="$root/conan/locks"
@@ -42,7 +51,7 @@ boost/*: boost/$(version userver-boost)
 grpc/*: grpc/$(version grpc)
 googleapis/*: googleapis/$(version userver-googleapis)@gorundebug/userver
 gtest/*: gtest/$(version userver-googletest)
-librdkafka/*: librdkafka/$(version librdkafka)
+librdkafka/*: librdkafka/$(version librdkafka)@gorundebug/userver
 opentelemetry-proto/*: opentelemetry-proto/$(version userver-opentelemetry-proto)
 protobuf/*: protobuf/$(version protobuf)
 re2/*: re2/$(version re2)
@@ -52,7 +61,8 @@ yaml-cpp/*: yaml-cpp/$(version yaml-cpp)
 protobuf/*: protobuf/$(version protobuf)
 EOF
   conan lock create --requires="userver/$(version userver)@gorundebug/userver" \
-    --requires="librdkafka/$(version librdkafka)" \
+    --requires="librdkafka/$(version librdkafka)@gorundebug/userver" \
+    --requires="libcron/$(version libcron)@gorundebug/userver" \
     --profile:host "$effective_profile" \
     --profile:build "$effective_profile" \
     -s:h build_type=Release \
@@ -71,5 +81,8 @@ EOF
     -o "userver/*:with_utest=True" \
     -o "userver/*:with_grpc_reflection=False" \
     -o "userver/*:with_grpc_protovalidate=False" \
+    "${userver_package_args[@]}" \
+    -o:h "openssl/*:no_engine=False" \
+    -o:b "openssl/*:no_engine=False" \
     --lockfile-out "$lock_dir/$(basename "$profile").lock"
 done

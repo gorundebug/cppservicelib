@@ -81,6 +81,8 @@ class MockServiceComponent final : public userver::components::ComponentBase {
                        const userver::components::ComponentContext& context);
   ~MockServiceComponent() override;
 
+  void OnAllComponentsAreStopping() override;
+
   std::shared_ptr<servicelib::datasource::http::IUserverEndpoint>
   httpDataSourceEndpoint(int endpointId) const;
 

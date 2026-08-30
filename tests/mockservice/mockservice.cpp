@@ -158,6 +158,8 @@ MockServiceComponent::MockServiceComponent(
 
 MockServiceComponent::~MockServiceComponent() { service_.stop(); }
 
+void MockServiceComponent::OnAllComponentsAreStopping() { service_.stop(); }
+
 std::shared_ptr<servicelib::datasource::http::IUserverEndpoint>
 MockServiceComponent::httpDataSourceEndpoint(int endpointId) const {
   return service_.httpDataSourceEndpoint(endpointId);

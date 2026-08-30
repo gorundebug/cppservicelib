@@ -369,6 +369,17 @@ class UserverEndpoint final : public IUserverEndpoint {
         static_cast<void>(pending_.pop(streamId));
         metrics_.pendingRemove(streamId);
       }
+      // Generated endpoint callbacks retain ResultContext so they can signal
+      // completion. ResultContext in turn owns this PendingResult. A normal
+      // response erases its callback in consumeResult(), but cancellation can
+      // leave callbacks registered and therefore form a self-owning cycle.
+      // No consumeResult() callback can be active while lifetimeMutex is held
+      // exclusively, so this is the request boundary at which all remaining
+      // callbacks must be released.
+      {
+        std::lock_guard callbacksLock(result->callbacksMutex);
+        result->callbacks.clear();
+      }
       if (resultWaitFailed && result->doneSent.load(std::memory_order_acquire)) {
         error = nullptr;
         doneReceived = true;

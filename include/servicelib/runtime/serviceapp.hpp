@@ -107,6 +107,12 @@ class ServiceLifecycle final {
 
   void stop(Context context,
             log::Logger& logger = log::NoopLogger::instance()) {
+    stopBeforeGraphDrain(context, logger);
+    stopAfterGraphDrain(context, logger);
+  }
+
+  void stopBeforeGraphDrain(
+      Context context, log::Logger& logger = log::NoopLogger::instance()) {
     if (state_ == State::kCreated) {
       state_ = State::kStopped;
       clear();
@@ -124,7 +130,15 @@ class ServiceLifecycle final {
       appendReverse(firstPhase, entries_[index(kind)]);
     }
     stopPhase(context, logger, firstPhase);
+  }
 
+  void stopAfterGraphDrain(
+      Context context, log::Logger& logger = log::NoopLogger::instance()) {
+    if (state_ == State::kStopped) return;
+    if (state_ != State::kStopping) {
+      throw std::logic_error(
+          "service lifecycle graph drain phase has not started");
+    }
     std::vector<Entry*> sinks;
     appendReverse(sinks, entries_[index(ServiceComponentKind::kDataSink)]);
     stopPhase(context, logger, sinks);
@@ -268,10 +282,14 @@ class ServiceLifecycle final {
     std::vector<userver::engine::TaskWithResult<std::exception_ptr>> tasks;
     tasks.reserve(entries.size());
     for (auto* entry : entries) {
+      auto stop = entry->stop;
+      auto owner = entry->owner;
       tasks.push_back(userver::engine::AsyncNoTracing(
-          [entry, context]() mutable -> std::exception_ptr {
+          [stop = std::move(stop), owner = std::move(owner),
+           context]() mutable -> std::exception_ptr {
+            static_cast<void>(owner);
             try {
-              entry->stop(std::move(context));
+              stop(std::move(context));
               return {};
             } catch (...) {
               return std::current_exception();
@@ -301,12 +319,16 @@ class ServiceLifecycle final {
       }
     }
 
-    // Join every component stop call before releasing ownership. A shutdown
-    // deadline is observable through telemetry, but never permits accepted
-    // asynchronous work to outlive the graph.
-    userver::engine::WaitAllChecked(tasks);
-
     for (std::size_t i = 0; i < tasks.size(); ++i) {
+      if (!tasks[i].IsFinished()) {
+        // The service-wide shutdown deadline is an upper bound, not a
+        // diagnostic followed by an unbounded join. The task owns both the
+        // stop callable and its component until it completes, so detaching it
+        // cannot observe the cleared lifecycle registry.
+        userver::engine::DetachUnscopedUnsafe(
+            std::move(tasks[i]).AsTask());
+        continue;
+      }
       const auto error = tasks[i].Get();
       if (!error) continue;
       try {
@@ -467,11 +489,29 @@ class ServiceApp
         context = context.bounded(
             std::chrono::milliseconds{service->shutdownTimeout});
       }
-      lifecycle_.stop(std::move(context), this->getLogger());
+      lifecycle_.stopBeforeGraphDrain(context, this->getLogger());
     } catch (...) {
       lifecycleError = std::current_exception();
     }
-    this->stopExecutionRuntime();
+    const bool graphDrained = this->drainExecutionRuntime(context);
+    if (!graphDrained) {
+      try {
+        this->getLogger().warn("service graph drain timed out");
+      } catch (...) {
+      }
+    }
+    try {
+      lifecycle_.stopAfterGraphDrain(context, this->getLogger());
+    } catch (...) {
+      if (!lifecycleError) lifecycleError = std::current_exception();
+    }
+    if (graphDrained) {
+      this->releaseExecutionRuntime();
+    } else {
+      // In-flight work still owns graph callbacks. Preserve their targets
+      // after the service-wide shutdown deadline instead of freeing them.
+      this->abandonExecutionRuntime();
+    }
     releaseOwnedRuntimeObjects();
     if (lifecycleError) std::rethrow_exception(lifecycleError);
   }

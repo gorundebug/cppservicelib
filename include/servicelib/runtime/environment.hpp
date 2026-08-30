@@ -11,6 +11,7 @@
 #include <shared_mutex>
 #include <tuple>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <userver/engine/async.hpp>
@@ -258,21 +259,43 @@ class StreamExecutionEnvironment : public NotCopyableOrMovable,
     }
   }
 
-  void stopExecutionRuntime() noexcept {
-    if (!activeRuntime_) return;
-    auto* runtime = activeRuntime_;
-    activeRuntime_ = nullptr;
+  bool drainExecutionRuntime(Context context = {}) noexcept {
+    if (!activeRuntime_) return true;
+    bool drained = true;
     {
       userver::engine::TaskCancellationBlocker cancellationBlocker;
       std::unique_lock<userver::engine::Mutex> lock(parallelMutex_);
       // Sources and managed pools have already stopped. Active work may still
       // create nested ParallelCall operations; admission closes atomically
       // only after the complete nested graph has drained.
-      static_cast<void>(parallelDrained_.Wait(
-          lock, [this] { return parallelActive_ == 0; }));
+      if (context.deadline()) {
+        drained = parallelDrained_.WaitUntil(
+            lock, *context.deadline(), [this] { return parallelActive_ == 0; });
+      } else {
+        static_cast<void>(parallelDrained_.Wait(
+            lock, [this] { return parallelActive_ == 0; }));
+      }
       parallelAccepting_ = false;
     }
+    return drained;
+  }
+
+  void releaseExecutionRuntime() noexcept {
+    if (!activeRuntime_) return;
+    auto* runtime = activeRuntime_;
+    activeRuntime_ = nullptr;
     runtime->runtimeRelease();
+  }
+
+  void abandonExecutionRuntime() noexcept { activeRuntime_ = nullptr; }
+
+  bool stopExecutionRuntime(Context context = {}) noexcept {
+    if (!drainExecutionRuntime(std::move(context))) {
+      abandonExecutionRuntime();
+      return false;
+    }
+    releaseExecutionRuntime();
+    return true;
   }
 
   template <bool Compiled = false, size_t N = 0, typename... Args>

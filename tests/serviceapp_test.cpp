@@ -161,7 +161,14 @@ UTEST(ServiceLifecycle, StartsAndStopsInServiceAppOrder) {
                 std::make_shared<Component>("source", &events));
 
   lifecycle.start(servicelib::Context{});
-  lifecycle.stop(servicelib::Context{});
+  lifecycle.stopBeforeGraphDrain(servicelib::Context{});
+
+  const auto beforeGraphDrain = events.snapshot();
+  EXPECT_EQ(std::find(beforeGraphDrain.begin(), beforeGraphDrain.end(),
+                      "sink:stop"),
+            beforeGraphDrain.end());
+
+  lifecycle.stopAfterGraphDrain(servicelib::Context{});
 
   const auto recorded = events.snapshot();
   ASSERT_EQ(recorded.size(), 6);
@@ -213,7 +220,7 @@ UTEST(ServiceLifecycle, StopFailureDoesNotSkipOtherResources) {
   EXPECT_EQ(logger.records.front().error, "stop failed");
 }
 
-UTEST(ServiceLifecycle, DeadlineDiagnosesResourceButStillJoinsIt) {
+UTEST(ServiceLifecycle, DeadlineIsUpperBoundForWholeShutdown) {
   EventLog events;
   RecordingLogger logger;
   std::atomic<bool> stopped{false};
@@ -224,14 +231,19 @@ UTEST(ServiceLifecycle, DeadlineDiagnosesResourceButStillJoinsIt) {
                                   std::chrono::milliseconds{30}, &stopped));
 
   lifecycle.start(servicelib::Context{});
+  const auto started = std::chrono::steady_clock::now();
   lifecycle.stop(servicelib::Context{}.bounded(std::chrono::milliseconds{1}),
                  logger);
 
-  EXPECT_TRUE(stopped.load());
+  EXPECT_LT(std::chrono::steady_clock::now() - started,
+            std::chrono::milliseconds{20});
+  EXPECT_FALSE(stopped.load());
   ASSERT_EQ(logger.records.size(), 1);
   EXPECT_EQ(logger.records.front().message,
             "service shutdown operation timed out");
   EXPECT_EQ(logger.records.front().resource, "component:0");
+  userver::engine::SleepFor(std::chrono::milliseconds{40});
+  EXPECT_TRUE(stopped.load());
 }
 
 UTEST(ServiceLifecycle, DataConnectorTimeoutMatchesGoTelemetry) {
@@ -250,7 +262,7 @@ UTEST(ServiceLifecycle, DataConnectorTimeoutMatchesGoTelemetry) {
   lifecycle.stop(servicelib::Context{}.bounded(std::chrono::milliseconds{1}),
                  logger);
 
-  EXPECT_TRUE(stopped.load());
+  EXPECT_FALSE(stopped.load());
   EXPECT_EQ(metrics
                 .counter("datasource_connector.events_total",
                          {{"connector", "0"}, {"event", "stop_timeout"}})
@@ -259,6 +271,8 @@ UTEST(ServiceLifecycle, DataConnectorTimeoutMatchesGoTelemetry) {
   const auto entries = logger.entries();
   ASSERT_EQ(entries.size(), 1);
   EXPECT_EQ(entries.front().message, "data source stopped by timeout");
+  userver::engine::SleepFor(std::chrono::milliseconds{40});
+  EXPECT_TRUE(stopped.load());
 }
 
 UTEST(ServiceApp, PreparesConfiguredPoolsOnGraphLookup) {

@@ -159,6 +159,7 @@ struct SourceHandler final {
   std::string* observedStreamId{};
   std::string* observedTraceState{};
   std::string* observedBaggage{};
+  std::weak_ptr<void> callbackLifetime{};
 
   servicelib::BeginResult<State> beginRequest(
       servicelib::MessageContext context, auto&, auto&) {
@@ -172,9 +173,11 @@ struct SourceHandler final {
     if (observedBaggage) *observedBaggage = context.trace().baggage;
     auto* const expectedStreamContext = &streamContext;
     resultContext.setResultCallback(
-        "response", [resultContext, expectedStreamContext](
+        "response", [resultContext, expectedStreamContext,
+                     lifetime = callbackLifetime.lock()](
                         servicelib::MessageContext, auto& callbackStreamContext,
                         State&, const std::string& value, auto& data) mutable {
+          static_cast<void>(lifetime);
           EXPECT_EQ(&callbackStreamContext, expectedStreamContext);
           data.response.SetStatus(userver::server::http::HttpStatus::kCreated);
           data.setResponseBody("reply:" + value);
@@ -428,10 +431,14 @@ UTEST(HttpDataSource, CancellationIsVisibleAndPendingAgeIsObservable) {
   std::string observedStreamId;
   servicelib::MessageContext pipelineContext;
   userver::engine::SingleUseEvent collected;
+  auto callbackLifetime = std::make_shared<int>(1);
+  std::weak_ptr<int> callbackLifetimeWeak = callbackLifetime;
   using Endpoint =
       servicelib::datasource::http::UserverEndpoint<std::string, std::string,
                                                     SourceHandler>;
-  Endpoint endpoint{environment, 1, SourceHandler{&endCalls, &observedStreamId},
+  Endpoint endpoint{environment, 1,
+                    SourceHandler{&endCalls, &observedStreamId, nullptr,
+                                  nullptr, callbackLifetime},
                     [&](servicelib::MessageContext context,
                         servicelib::Payload<std::string>) {
                       pipelineContext = std::move(context);
@@ -447,6 +454,7 @@ UTEST(HttpDataSource, CancellationIsVisibleAndPendingAgeIsObservable) {
   auto requestTask = userver::utils::Async(
       "cancel-http-datasource", [&] { return endpoint.handle(*request); });
   collected.Wait();
+  callbackLifetime.reset();
   userver::engine::SleepFor(std::chrono::milliseconds{5});
 
   const servicelib::metrics::Labels labels{{"connector", "http"},
@@ -461,6 +469,7 @@ UTEST(HttpDataSource, CancellationIsVisibleAndPendingAgeIsObservable) {
   requestTask.RequestCancel();
   static_cast<void>(requestTask.Get());
   EXPECT_TRUE(pipelineContext.cancelled());
+  EXPECT_TRUE(callbackLifetimeWeak.expired());
   EXPECT_EQ(endCalls, 1);
   EXPECT_DOUBLE_EQ(
       environment.metrics()
