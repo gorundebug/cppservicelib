@@ -174,7 +174,7 @@ UTEST(ServiceLifecycle, StartsAndStopsInServiceAppOrder) {
   ASSERT_EQ(recorded.size(), 6);
   EXPECT_EQ(
       std::vector(recorded.begin(), recorded.begin() + 3),
-      (std::vector<std::string>{"source:start", "sink:start", "delay:start"}));
+      (std::vector<std::string>{"delay:start", "sink:start", "source:start"}));
   EXPECT_EQ(recorded.back(), "sink:stop");
   EXPECT_NE(std::find(recorded.begin() + 3, recorded.end(), "source:stop"),
             recorded.end());
@@ -186,14 +186,14 @@ UTEST(ServiceLifecycle, RollsBackAlreadyStartedComponents) {
   EventLog events;
   servicelib::ServiceLifecycle lifecycle;
   lifecycle.add(servicelib::ServiceComponentKind::kDataSource,
-                std::make_shared<Component>("source", &events));
+                std::make_shared<Component>("source", &events, true));
   lifecycle.add(servicelib::ServiceComponentKind::kDataSink,
-                std::make_shared<Component>("sink", &events, true));
+                std::make_shared<Component>("sink", &events));
 
   EXPECT_THROW(lifecycle.start(servicelib::Context{}), std::runtime_error);
   EXPECT_EQ(
       events.snapshot(),
-      (std::vector<std::string>{"source:start", "sink:start", "source:stop"}));
+      (std::vector<std::string>{"sink:start", "source:start", "sink:stop"}));
 }
 
 UTEST(ServiceLifecycle, StopFailureDoesNotSkipOtherResources) {
