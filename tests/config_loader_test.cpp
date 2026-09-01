@@ -304,6 +304,7 @@ temporalConnector:
   identity: automation-service
   maxConcurrentActivities: 12
   maxConcurrentWorkflows: 7
+  workerStopTimeout: 5000
 cronEndpoint:
   id: 41
   name: hourly-trigger
@@ -339,6 +340,7 @@ temporalEndpoint:
           .As<servicelib::config::TemporalDataConnectorConfig>();
   EXPECT_EQ(temporalConnector.namespaceName, "servicegen");
   EXPECT_EQ(temporalConnector.maxConcurrentActivities, 12);
+  EXPECT_EQ(temporalConnector.workerStopTimeout, 5000);
 
   const auto cronEndpoint =
       yaml["cronEndpoint"].As<servicelib::config::CronEndpointConfig>();

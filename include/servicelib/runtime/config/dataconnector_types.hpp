@@ -115,6 +115,7 @@ struct TemporalDataConnectorConfig {
   std::string tlsKeyFile;
   int maxConcurrentActivities{};
   int maxConcurrentWorkflows{};
+  int workerStopTimeout{};
   PropertiesMap properties;
 
   servicelib::api::DataConnectorType GetType() const noexcept {
@@ -332,12 +333,14 @@ inline TemporalDataConnectorConfig Parse(
   result.tlsKeyFile = value["tlsKeyFile"].As<std::string>("");
   result.maxConcurrentActivities = value["maxConcurrentActivities"].As<int>(0);
   result.maxConcurrentWorkflows = value["maxConcurrentWorkflows"].As<int>(0);
+  result.workerStopTimeout = value["workerStopTimeout"].As<int>(0);
   detail::ParseRemainingProperties(
       value,
       {"id", "name", "implementation", "address", "namespace", "identity",
        "apiKey", "tlsEnabled", "tlsServerName", "tlsCaFile", "tlsCertFile",
        "tlsKeyFile",
-       "maxConcurrentActivities", "maxConcurrentWorkflows"},
+       "maxConcurrentActivities", "maxConcurrentWorkflows",
+       "workerStopTimeout"},
       result.properties);
   return result;
 }
