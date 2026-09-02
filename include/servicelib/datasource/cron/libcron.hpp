@@ -22,6 +22,7 @@
 #include <servicelib/runtime/environment/environment.hpp>
 #include <servicelib/runtime/payload.hpp>
 #include <servicelib/runtime/schedule.hpp>
+#include <userver/engine/mutex.hpp>
 #include <userver/engine/single_consumer_event.hpp>
 
 namespace servicelib {
@@ -89,7 +90,7 @@ class ResultWaiter final {
     if (found != pending_.end() && found->second == pending) pending_.erase(found);
   }
 
-  std::mutex mutex_;
+  userver::engine::Mutex mutex_;
   std::unordered_map<std::string, std::shared_ptr<Pending>> pending_;
 };
 

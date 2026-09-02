@@ -17,6 +17,7 @@
 #include <userver/engine/async.hpp>
 #include <userver/engine/condition_variable.hpp>
 #include <userver/engine/mutex.hpp>
+#include <userver/engine/shared_mutex.hpp>
 #include <userver/engine/task/task.hpp>
 
 #include <servicelib/runtime/caller.hpp>
@@ -356,7 +357,7 @@ class StreamExecutionEnvironment : public NotCopyableOrMovable,
   std::unordered_map<config::LinkID, std::unique_ptr<CallerBase>,
                      config::LinkIDHash>
       callers_;
-  mutable std::shared_mutex callersMutex_;
+  mutable userver::engine::SharedMutex callersMutex_;
   std::string topologyCode_;
   bool topologyBuilt_{false};
   ExecutionRuntime* activeRuntime_{nullptr};

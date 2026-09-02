@@ -7,6 +7,7 @@
 #include <userver/concurrent/background_task_storage.hpp>
 #include <userver/engine/condition_variable.hpp>
 #include <userver/engine/mutex.hpp>
+#include <userver/engine/shared_mutex.hpp>
 #include <userver/engine/single_use_event.hpp>
 
 #include <servicelib/datasink/grpc/common.hpp>
@@ -37,7 +38,7 @@ class ClientStreamingEndpoint final : public Endpoint<T, R, Handler, E> {
     std::shared_ptr<tracing::Span> span;
     userver::engine::SingleUseEvent done;
     std::atomic<bool> doneSent{false};
-    std::shared_mutex lifetimeMutex;
+    userver::engine::SharedMutex lifetimeMutex;
   };
 
   // SessionCell reserves a pending-map slot for a streamId before the
@@ -195,8 +196,8 @@ class ClientStreamingEndpoint final : public Endpoint<T, R, Handler, E> {
       }
     } endSpan{session->span};
     std::exception_ptr error;
-    std::unique_lock<std::shared_mutex> lifetimeLock(session->lifetimeMutex,
-                                                     std::defer_lock);
+    std::unique_lock<userver::engine::SharedMutex> lifetimeLock(
+        session->lifetimeMutex, std::defer_lock);
     try {
       session->done.Wait();
       tracing::SpanEvent(session->span.get(), "done_received");

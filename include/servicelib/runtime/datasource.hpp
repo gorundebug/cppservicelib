@@ -15,6 +15,8 @@
 #include <unordered_map>
 #include <utility>
 
+#include <userver/engine/mutex.hpp>
+
 #include <servicelib/runtime/common.hpp>
 #include <servicelib/runtime/config/config.hpp>
 #include <servicelib/runtime/environment/log/log.hpp>
@@ -251,7 +253,7 @@ class DataSourceEndpointMetrics final {
 
  private:
   struct PendingRequestShard {
-    mutable std::mutex mutex;
+    mutable userver::engine::Mutex mutex;
     std::unordered_map<std::string, Clock::time_point> started;
   };
 

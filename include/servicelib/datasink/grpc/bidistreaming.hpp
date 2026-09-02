@@ -7,6 +7,7 @@
 #include <userver/concurrent/background_task_storage.hpp>
 #include <userver/engine/condition_variable.hpp>
 #include <userver/engine/mutex.hpp>
+#include <userver/engine/shared_mutex.hpp>
 
 #include <servicelib/datasink/grpc/common.hpp>
 #include <servicelib/runtime/store/rotatingmap.hpp>
@@ -35,7 +36,7 @@ class BidirectionalStreamingEndpoint final : public Endpoint<T, R, Handler, E> {
     DataSinkEndpointMetrics::Clock::time_point startedAt;
     std::shared_ptr<tracing::Span> span;
     std::atomic<bool> done{false};
-    std::shared_mutex lifetimeMutex;
+    userver::engine::SharedMutex lifetimeMutex;
   };
 
   // SessionCell reserves a pending-map slot for a streamId before the

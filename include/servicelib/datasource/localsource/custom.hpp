@@ -18,6 +18,7 @@
 #include <userver/concurrent/background_task_storage.hpp>
 #include <userver/engine/condition_variable.hpp>
 #include <userver/engine/mutex.hpp>
+#include <userver/engine/shared_mutex.hpp>
 #include <userver/engine/single_use_event.hpp>
 #include <userver/utils/uuid7.hpp>
 
@@ -57,8 +58,8 @@ struct PendingResult final {
   userver::engine::SingleUseEvent done;
   std::atomic<bool> wakeSent{false};
   std::atomic<bool> completed{false};
-  std::shared_mutex lifetimeMutex;
-  std::mutex callbacksMutex;
+  userver::engine::SharedMutex lifetimeMutex;
+  userver::engine::Mutex callbacksMutex;
   std::unordered_map<std::string, Callback> callbacks;
 };
 

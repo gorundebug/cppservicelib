@@ -20,6 +20,8 @@
 #include <vector>
 
 #include <userver/components/component_context.hpp>
+#include <userver/engine/mutex.hpp>
+#include <userver/engine/shared_mutex.hpp>
 #include <userver/engine/single_use_event.hpp>
 #include <userver/engine/task/cancel.hpp>
 #include <userver/engine/task/current_task.hpp>
@@ -78,8 +80,8 @@ struct PendingResult final {
   std::shared_ptr<tracing::Span> span;
   userver::engine::SingleUseEvent done;
   std::atomic<bool> doneSent{false};
-  std::shared_mutex lifetimeMutex;
-  std::mutex callbacksMutex;
+  userver::engine::SharedMutex lifetimeMutex;
+  userver::engine::Mutex callbacksMutex;
   std::unordered_map<std::string, Callback> callbacks;
 };
 

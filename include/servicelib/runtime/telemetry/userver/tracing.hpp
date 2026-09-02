@@ -31,6 +31,7 @@
 
 #include <userver/logging/level.hpp>
 #include <userver/logging/log_extra.hpp>
+#include <userver/engine/mutex.hpp>
 #include <userver/tracing/manager.hpp>
 #include <userver/tracing/span.hpp>
 #include <userver/tracing/span_event.hpp>
@@ -158,7 +159,7 @@ class UserverSpan final : public tracing::Span {
   }
 
   // Empty (nullopt) once end() has been called.
-  mutable std::mutex mutex_;
+  mutable userver::engine::Mutex mutex_;
   std::optional<::userver::tracing::Span> span_;
   std::string traceState_;
 };
