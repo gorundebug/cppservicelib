@@ -17,7 +17,6 @@
 #include <userver/engine/async.hpp>
 #include <userver/engine/condition_variable.hpp>
 #include <userver/engine/mutex.hpp>
-#include <userver/engine/shared_mutex.hpp>
 #include <userver/engine/task/task.hpp>
 
 #include <servicelib/runtime/caller.hpp>
@@ -357,7 +356,11 @@ class StreamExecutionEnvironment : public NotCopyableOrMovable,
   std::unordered_map<config::LinkID, std::unique_ptr<CallerBase>,
                      config::LinkIDHash>
       callers_;
-  mutable userver::engine::SharedMutex callersMutex_;
+  // Topology is prepared and released from ordinary startup/shutdown threads,
+  // while status readers may inspect it concurrently. This is intentionally
+  // a standard mutex: userver::engine::SharedMutex requires coroutine context
+  // and cannot be used by the public topology-building API.
+  mutable std::shared_mutex callersMutex_;
   std::string topologyCode_;
   bool topologyBuilt_{false};
   ExecutionRuntime* activeRuntime_{nullptr};
