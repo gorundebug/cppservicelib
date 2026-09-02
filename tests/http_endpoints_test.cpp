@@ -118,9 +118,15 @@ class TestEnvironment final : public servicelib::IRuntimeEnvironment {
 // production applications use StreamExecutionEnvironment here.
 class DirectStreamContext final {
  public:
+  struct InputInvocation final {};
+
   static DirectStreamContext& getExecutionEnvironment() {
     static DirectStreamContext context;
     return context;
+  }
+
+  [[nodiscard]] InputInvocation beginInputInvocation() const noexcept {
+    return {};
   }
 
   template <typename T, typename Source, typename Consumer>
