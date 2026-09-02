@@ -5,6 +5,8 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -36,6 +38,24 @@ class StreamExecutionEnvironment : public NotCopyableOrMovable,
  public:
   using StreamAppType = TStreamApp;
   using DataTypeFactory = TDataTypeFactory;
+
+  class InputInvocation final {
+   public:
+    InputInvocation() noexcept = default;
+    explicit InputInvocation(StreamExecutionEnvironment& environment) noexcept
+        : environment_(&environment) {}
+    InputInvocation(const InputInvocation&) = delete;
+    InputInvocation& operator=(const InputInvocation&) = delete;
+    InputInvocation(InputInvocation&& other) noexcept
+        : environment_(std::exchange(other.environment_, nullptr)) {}
+    InputInvocation& operator=(InputInvocation&&) = delete;
+    ~InputInvocation() {
+      if (environment_) environment_->finishInputInvocation();
+    }
+
+   private:
+    StreamExecutionEnvironment* environment_{};
+  };
 
  private:
   using EnvironmentContext =
@@ -101,6 +121,23 @@ class StreamExecutionEnvironment : public NotCopyableOrMovable,
     return metrics::NoopMetrics::instance();
   }
   tracing::Tracing* getTracing() override { return nullptr; }
+
+  [[nodiscard]] InputInvocation beginInputInvocation() {
+    auto state = inputInvocations_.load(std::memory_order_acquire);
+    for (;;) {
+      if ((state & kInputInvocationClosed) != 0) {
+        throw StreamException("stream execution runtime is stopping");
+      }
+      if ((state & kInputInvocationCountMask) == kInputInvocationCountMask) {
+        throw StreamException("too many active stream input invocations");
+      }
+      if (inputInvocations_.compare_exchange_weak(
+              state, state + 1, std::memory_order_acq_rel,
+              std::memory_order_acquire)) {
+        return InputInvocation(*this);
+      }
+    }
+  }
 
   void parallel(std::function<void()> task) override {
     {
@@ -231,6 +268,7 @@ class StreamExecutionEnvironment : public NotCopyableOrMovable,
     if (activeRuntime_) {
       throw std::logic_error("stream execution runtime is already started");
     }
+    inputInvocations_.store(0, std::memory_order_release);
     {
       std::unique_lock<userver::engine::Mutex> lock(parallelMutex_);
       if (parallelActive_ != 0) {
@@ -254,19 +292,22 @@ class StreamExecutionEnvironment : public NotCopyableOrMovable,
 
   bool drainExecutionRuntime(Context context = {}) noexcept {
     if (!activeRuntime_) return true;
+    inputInvocations_.fetch_or(kInputInvocationClosed,
+                               std::memory_order_acq_rel);
     bool drained = true;
     {
       userver::engine::TaskCancellationBlocker cancellationBlocker;
       std::unique_lock<userver::engine::Mutex> lock(parallelMutex_);
-      // Sources and managed pools have already stopped. Active work may still
-      // create nested ParallelCall operations; admission closes atomically
-      // only after the complete nested graph has drained.
+      const auto isDrained = [this] {
+        return (inputInvocations_.load(std::memory_order_acquire) &
+                kInputInvocationCountMask) == 0 &&
+               parallelActive_ == 0;
+      };
       if (context.deadline()) {
-        drained = parallelDrained_.WaitUntil(
-            lock, *context.deadline(), [this] { return parallelActive_ == 0; });
+        drained = parallelDrained_.WaitUntil(lock, *context.deadline(),
+                                             isDrained);
       } else {
-        static_cast<void>(parallelDrained_.Wait(
-            lock, [this] { return parallelActive_ == 0; }));
+        static_cast<void>(parallelDrained_.Wait(lock, isDrained));
       }
       parallelAccepting_ = false;
     }
@@ -305,6 +346,19 @@ class StreamExecutionEnvironment : public NotCopyableOrMovable,
   }
 
  private:
+  void finishInputInvocation() noexcept {
+    const auto previous =
+        inputInvocations_.fetch_sub(1, std::memory_order_acq_rel);
+    if ((previous & kInputInvocationCountMask) == 1) {
+      parallelDrained_.NotifyAll();
+    }
+  }
+
+  static constexpr std::uint64_t kInputInvocationClosed =
+      std::uint64_t{1} << 63;
+  static constexpr std::uint64_t kInputInvocationCountMask =
+      ~kInputInvocationClosed;
+
   void releaseStreams() noexcept {
     callers_.clear();
     streams_.clear();
@@ -314,6 +368,7 @@ class StreamExecutionEnvironment : public NotCopyableOrMovable,
 
   userver::engine::Mutex parallelMutex_;
   userver::engine::ConditionVariable parallelDrained_;
+  std::atomic<std::uint64_t> inputInvocations_{0};
   std::size_t parallelActive_{};
   bool parallelAccepting_{};
 

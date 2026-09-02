@@ -180,6 +180,8 @@ UTEST(ServiceLifecycle, StartsAndStopsInServiceAppOrder) {
             recorded.end());
   EXPECT_NE(std::find(recorded.begin() + 3, recorded.end(), "delay:stop"),
             recorded.end());
+  EXPECT_LT(std::find(recorded.begin() + 3, recorded.end(), "source:stop"),
+            std::find(recorded.begin() + 3, recorded.end(), "delay:stop"));
 }
 
 UTEST(ServiceLifecycle, RollsBackAlreadyStartedComponents) {
@@ -282,6 +284,35 @@ UTEST(ServiceApp, PreparesConfiguredPoolsOnGraphLookup) {
   {
     Service service;
     EXPECT_NE(service.getPriorityTaskPool("Default Pool"), nullptr);
+  }
+  servicelib::config::RuntimeConfigRegistry::Publish({});
+}
+
+UTEST(ServiceApp, StopWaitsForAcceptedInputInvocation) {
+  PriorityPoolConfig config;
+  servicelib::config::RuntimeConfigRegistry::Publish(
+      std::make_shared<const servicelib::config::RuntimeConfig>(config));
+  {
+    Service service;
+    service.start();
+    auto invocation = std::make_unique<
+        decltype(service.beginInputInvocation())>(
+        service.beginInputInvocation());
+    std::atomic<bool> stopReturned{false};
+    auto stopTask = userver::engine::AsyncNoTracing([&] {
+      service.stop();
+      stopReturned.store(true, std::memory_order_release);
+    });
+
+    userver::engine::SleepFor(std::chrono::milliseconds{10});
+    EXPECT_FALSE(stopReturned.load(std::memory_order_acquire));
+    invocation.reset();
+    stopTask.Get();
+    EXPECT_TRUE(stopReturned.load(std::memory_order_acquire));
+#ifdef NDEBUG
+    EXPECT_THROW(static_cast<void>(service.beginInputInvocation()),
+                 servicelib::StreamException);
+#endif
   }
   servicelib::config::RuntimeConfigRegistry::Publish({});
 }
