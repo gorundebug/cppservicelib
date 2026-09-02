@@ -8,7 +8,6 @@
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <shared_mutex>
 #include <tuple>
 #include <unordered_map>
 #include <utility>
@@ -154,21 +153,16 @@ class StreamExecutionEnvironment : public NotCopyableOrMovable,
           "Caller");
     }
 
-    {
-      std::shared_lock lock(callersMutex_);
-      const auto found = callers_.find(link);
-      if (found != callers_.end()) {
-        return static_cast<Caller<Value>*>(found->second.get());
-      }
+    const auto found = callers_.find(link);
+    if (found != callers_.end()) {
+      return static_cast<Caller<Value>*>(found->second.get());
     }
 
-    std::unique_lock lock(callersMutex_);
-    if (!callers_.contains(link)) {
-      callers_.emplace(link,
-                       makeCallerFromEnv<Value>(producer, consumer, this, link,
-                                                std::move(sourceNameOverride)));
-    }
-    return static_cast<Caller<Value>*>(callers_.at(link).get());
+    auto [inserted, created] = callers_.emplace(
+        link, makeCallerFromEnv<Value>(producer, consumer, this, link,
+                                       std::move(sourceNameOverride)));
+    static_cast<void>(created);
+    return static_cast<Caller<Value>*>(inserted->second.get());
   }
 
   template <typename Value, typename Producer, typename Consumer>
@@ -203,7 +197,6 @@ class StreamExecutionEnvironment : public NotCopyableOrMovable,
     StatusTopologyPrinter topology;
     printTopology(topology);
     return status::MakeNetworkDataJson(*runtime, topology, [this](config::LinkID link) {
-      std::shared_lock lock(callersMutex_);
       const auto found = callers_.find(link);
       return found == callers_.end() ? std::int64_t{0}
                                      : found->second->statistics().count();
@@ -313,10 +306,7 @@ class StreamExecutionEnvironment : public NotCopyableOrMovable,
 
  private:
   void releaseStreams() noexcept {
-    {
-      std::unique_lock lock(callersMutex_);
-      callers_.clear();
-    }
+    callers_.clear();
     streams_.clear();
     topologyCode_.clear();
     topologyBuilt_ = false;
@@ -356,11 +346,9 @@ class StreamExecutionEnvironment : public NotCopyableOrMovable,
   std::unordered_map<config::LinkID, std::unique_ptr<CallerBase>,
                      config::LinkIDHash>
       callers_;
-  // Topology is prepared and released from ordinary startup/shutdown threads,
-  // while status readers may inspect it concurrently. This is intentionally
-  // a standard mutex: userver::engine::SharedMutex requires coroutine context
-  // and cannot be used by the public topology-building API.
-  mutable std::shared_mutex callersMutex_;
+  // Built once before listeners start, immutable while the service is running,
+  // and released only after listeners and in-flight graph work are drained.
+  // Per-message dispatch uses the prepared caller pointer directly.
   std::string topologyCode_;
   bool topologyBuilt_{false};
   ExecutionRuntime* activeRuntime_{nullptr};
