@@ -153,6 +153,14 @@ struct RecordingLogger final : servicelib::log::Logger {
 UTEST(ServiceLifecycle, StartsAndStopsInServiceAppOrder) {
   EventLog events;
   servicelib::ServiceLifecycle lifecycle;
+  lifecycle.add(servicelib::ServiceComponentKind::kStorage,
+                std::make_shared<Component>("storage", &events));
+  lifecycle.add(servicelib::ServiceComponentKind::kTaskPool,
+                std::make_shared<Component>("task", &events));
+  lifecycle.add(servicelib::ServiceComponentKind::kPriorityTaskPool,
+                std::make_shared<Component>("priority", &events));
+  lifecycle.add(servicelib::ServiceComponentKind::kComponent,
+                std::make_shared<Component>("component", &events));
   lifecycle.add(servicelib::ServiceComponentKind::kDataSink,
                 std::make_shared<Component>("sink", &events));
   lifecycle.add(servicelib::ServiceComponentKind::kDelayPool,
@@ -171,17 +179,19 @@ UTEST(ServiceLifecycle, StartsAndStopsInServiceAppOrder) {
   lifecycle.stopAfterGraphDrain(servicelib::Context{});
 
   const auto recorded = events.snapshot();
-  ASSERT_EQ(recorded.size(), 6);
+  ASSERT_EQ(recorded.size(), 14);
   EXPECT_EQ(
-      std::vector(recorded.begin(), recorded.begin() + 3),
-      (std::vector<std::string>{"delay:start", "sink:start", "source:start"}));
+      std::vector(recorded.begin(), recorded.begin() + 7),
+      (std::vector<std::string>{"storage:start", "delay:start", "task:start",
+                                "priority:start", "component:start",
+                                "sink:start", "source:start"}));
   EXPECT_EQ(recorded.back(), "sink:stop");
-  EXPECT_NE(std::find(recorded.begin() + 3, recorded.end(), "source:stop"),
+  EXPECT_NE(std::find(recorded.begin() + 7, recorded.end(), "source:stop"),
             recorded.end());
-  EXPECT_NE(std::find(recorded.begin() + 3, recorded.end(), "delay:stop"),
+  EXPECT_NE(std::find(recorded.begin() + 7, recorded.end(), "delay:stop"),
             recorded.end());
-  EXPECT_LT(std::find(recorded.begin() + 3, recorded.end(), "source:stop"),
-            std::find(recorded.begin() + 3, recorded.end(), "delay:stop"));
+  EXPECT_LT(std::find(recorded.begin() + 7, recorded.end(), "source:stop"),
+            std::find(recorded.begin() + 7, recorded.end(), "delay:stop"));
 }
 
 UTEST(ServiceLifecycle, RollsBackAlreadyStartedComponents) {
