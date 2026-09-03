@@ -302,8 +302,6 @@ temporalConnector:
   address: temporal:7233
   namespace: servicegen
   identity: automation-service
-  maxConcurrentActivities: 12
-  maxConcurrentWorkflows: 7
   workerStopTimeout: 5000
 cronEndpoint:
   id: 41
@@ -329,6 +327,7 @@ temporalEndpoint:
   activityStartToCloseTimeout: 10000
   activityHeartbeatTimeout: 1000
   maximumAttempts: 5
+  maxConcurrentActivities: 12
 )");
 
   const auto cronConnector =
@@ -339,7 +338,6 @@ temporalEndpoint:
       yaml["temporalConnector"]
           .As<servicelib::config::TemporalDataConnectorConfig>();
   EXPECT_EQ(temporalConnector.namespaceName, "servicegen");
-  EXPECT_EQ(temporalConnector.maxConcurrentActivities, 12);
   EXPECT_EQ(temporalConnector.workerStopTimeout, 5000);
 
   const auto cronEndpoint =
@@ -352,6 +350,7 @@ temporalEndpoint:
       yaml["temporalEndpoint"].As<servicelib::config::TemporalEndpointConfig>();
   EXPECT_EQ(temporalEndpoint.taskQueue, "automation");
   EXPECT_EQ(temporalEndpoint.maximumAttempts, 5);
+  EXPECT_EQ(temporalEndpoint.maxConcurrentActivities, 12);
 
 }
 

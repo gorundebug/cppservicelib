@@ -151,6 +151,8 @@ struct TemporalEndpointConfig {
   int activityStartToCloseTimeout{};
   int activityHeartbeatTimeout{};
   int maximumAttempts{};
+  int maxConcurrentActivities{};
+  int maxConcurrentWorkflowTasks{};
   std::string functionName;
   std::string functionPackage;
   bool publicFunction{};
@@ -404,6 +406,9 @@ inline TemporalEndpointConfig Parse(
   result.activityHeartbeatTimeout =
       value["activityHeartbeatTimeout"].As<int>(0);
   result.maximumAttempts = value["maximumAttempts"].As<int>(0);
+  result.maxConcurrentActivities = value["maxConcurrentActivities"].As<int>(0);
+  result.maxConcurrentWorkflowTasks =
+      value["maxConcurrentWorkflowTasks"].As<int>(0);
   detail::ParseFunctionFields(value, result);
   detail::ParseRemainingProperties(value,
                                    {"id",
@@ -422,6 +427,8 @@ inline TemporalEndpointConfig Parse(
                                     "activityStartToCloseTimeout",
                                     "activityHeartbeatTimeout",
                                     "maximumAttempts",
+                                    "maxConcurrentActivities",
+                                    "maxConcurrentWorkflowTasks",
                                     "functionName",
                                     "functionPackage",
                                     "publicFunction",
