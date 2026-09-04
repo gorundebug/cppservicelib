@@ -5,6 +5,7 @@ VERSIONS = {
     "grpc": "1.71.0",
     "libcron": "1.3.3",
     "librdkafka": "2.8.0",
+    "openssl": "3.6.3",
     "protobuf": "5.29.3",
     "re2": "20230301",
     "userver": "3.1.0",

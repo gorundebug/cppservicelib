@@ -53,6 +53,7 @@ googleapis/*: googleapis/$(version userver-googleapis)@gorundebug/userver
 gtest/*: gtest/$(version userver-googletest)
 librdkafka/*: librdkafka/$(version librdkafka)@gorundebug/userver
 opentelemetry-proto/*: opentelemetry-proto/$(version userver-opentelemetry-proto)
+openssl/*: openssl/$(version openssl)
 protobuf/*: protobuf/$(version protobuf)
 re2/*: re2/$(version re2)
 yaml-cpp/*: yaml-cpp/$(version yaml-cpp)
