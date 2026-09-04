@@ -20,12 +20,16 @@ output_dir=${2:-$root/build/conan-${build_type,,}}
 profile=${CPPSERVICELIB_CONAN_PROFILE:-}
 extra_args=("${@:3}")
 network_retry_args=(
-  -cc "core.download:retry=${DEPENDENCY_COMMAND_RETRY_ATTEMPTS:-8}"
+  -cc "core.download:retry=${DEPENDENCY_COMMAND_RETRY_ATTEMPTS:-10}"
   -cc "core.download:retry_wait=${DEPENDENCY_COMMAND_RETRY_DELAY_SECONDS:-5}"
-  -cc "core.net.http:max_retries=${DEPENDENCY_COMMAND_RETRY_ATTEMPTS:-8}"
-  -c:h "tools.files.download:retry=${DEPENDENCY_COMMAND_RETRY_ATTEMPTS:-8}"
+  # Keep the requests adapter single-shot. Conan's package/source downloaders
+  # own the retry loop, and source downloads can also carry an ordered mirror
+  # list. Retrying at both layers multiplies waits and prevents timely fallback
+  # to the next recipe URL.
+  -cc "core.net.http:max_retries=0"
+  -c:h "tools.files.download:retry=${DEPENDENCY_COMMAND_RETRY_ATTEMPTS:-10}"
   -c:h "tools.files.download:retry_wait=${DEPENDENCY_COMMAND_RETRY_DELAY_SECONDS:-5}"
-  -c:b "tools.files.download:retry=${DEPENDENCY_COMMAND_RETRY_ATTEMPTS:-8}"
+  -c:b "tools.files.download:retry=${DEPENDENCY_COMMAND_RETRY_ATTEMPTS:-10}"
   -c:b "tools.files.download:retry_wait=${DEPENDENCY_COMMAND_RETRY_DELAY_SECONDS:-5}"
 )
 
