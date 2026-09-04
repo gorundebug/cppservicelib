@@ -27,6 +27,10 @@ grep -Fq -- 'core.net.http:max_retries=0' "$script" || {
   echo "low-level HTTP retries must stay disabled so recipe mirrors are tried promptly" >&2
   exit 1
 }
+grep -Fq -- 'core.net.http:timeout=${DEPENDENCY_HTTP_TIMEOUT_SECONDS:-30}' "$script" || {
+  echo "each Conan HTTP URL must have the shared bounded response timeout" >&2
+  exit 1
+}
 
 grep -Fq -- '--requires="libcron/$(version libcron)@gorundebug/userver"' "$script" || {
   echo "conditional libcron requirement is missing from the unified Conan graph" >&2
