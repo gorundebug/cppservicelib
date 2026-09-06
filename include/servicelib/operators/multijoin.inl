@@ -57,20 +57,23 @@ class MultiJoinImpl final : public MultiJoin<_TTp, _JTp, _JoinStrategy, _CCp>,
   friend class MultiBuilder;
   template <typename, typename, size_t>
   friend class JoinLinkImpl;
+  template <typename, typename>
+  friend class Collector;
   friend class StreamBuilderContext;
 
   StreamFunction<_JoinFunction, MultiJoinImpl> f_;
+  using LeftArgs = detail::key_value_args<_Tp>;
+  using Key = typename LeftArgs::key_type;
+  std::shared_ptr<store::IJoinStorage<Key>> joinStorage_;
 
  public:
   using topology_value_type = _JTp;
   using MultiJoin<_TTp, _JTp, _JoinStrategy, _CCp>::consume;
 
-  void consume(MessageContext ctx,
-               [[maybe_unused]] Payload<_Tp> payload) override {
+  void consume(MessageContext ctx, Payload<_Tp> payload) override {
     [[maybe_unused]] auto activeSpan =
         tracing::StartStreamSpan(ctx, *this, "stream.join");
-    if (this->hasConsumer()) {
-    }
+    consumeValue(ctx, payload.get().first, 0, payload.get().second);
   }
 
   size_t getId() const noexcept override {
@@ -104,6 +107,7 @@ class MultiJoinImpl final : public MultiJoin<_TTp, _JTp, _JoinStrategy, _CCp>,
     StreamConsumer<_Tp>::serde_ = serde;
     MultiJoin<_TTp, _JTp, _JoinStrategy, _CCp>::resolveDefaultSerde();
     this->env_ = env;
+    initializeStorage(cfg, env);
   }
 
   template <typename T, typename F = _JoinFunction,
@@ -133,8 +137,12 @@ class MultiJoinImpl final : public MultiJoin<_TTp, _JTp, _JoinStrategy, _CCp>,
   }
 
   template <typename _PTp, size_t N = 0>
-  void consumeRight([[maybe_unused]] MessageContext ctx,
-                    [[maybe_unused]] Payload<_PTp> payload) {}
+  void consumeRight(MessageContext ctx, Payload<_PTp> payload) {
+    static_assert(std::is_same_v<
+                  typename detail::key_value_args<_PTp>::key_type, Key>);
+    consumeValue(std::move(ctx), payload.get().first, N + 1,
+                 payload.get().second);
+  }
 
   size_t buildTopology(StreamBuilderContext& ctx, size_t id,
                        StreamBuilderContext::TIdsList* splitConsumerIds,
@@ -214,6 +222,71 @@ class MultiJoinImpl final : public MultiJoin<_TTp, _JTp, _JoinStrategy, _CCp>,
   template <typename T, typename F, typename Ctx>
   static auto build(unique_ptr<T> consumer, StreamFunction<F, Ctx>&& f) {
     return make(std::move(f), std::move(consumer));
+  }
+
+ private:
+  void initializeStorage(const servicelib::config::MultiJoinStreamConfig& cfg,
+                         IRuntimeEnvironment* env) {
+    if (!env) {
+      throw std::invalid_argument("multi-join runtime environment is null");
+    }
+    auto storage = store::makeJoinStorage<Key>(
+        cfg.joinStorage, *env, store::makeJoinStorageConfig(cfg));
+    joinStorage_ = std::shared_ptr<store::IJoinStorage<Key>>(std::move(storage));
+    auto& app = _Context::getExecutionEnvironment().getApp();
+    if constexpr (requires { app.registerStorage(joinStorage_); }) {
+      app.registerStorage(joinStorage_);
+    } else {
+      throw std::logic_error(
+          "multi-join runtime environment cannot register storage lifecycle");
+    }
+  }
+
+  template <std::size_t Index>
+  static void copyValues(_TTp& result, const store::JoinValues& values) {
+    if (values.size() <= Index) return;
+    auto& destination = std::get<Index>(result);
+    using Value =
+        typename std::remove_reference_t<decltype(destination)>::value_type;
+    destination.reserve(values[Index].size());
+    for (const auto& item : values[Index]) {
+      destination.push_back(std::any_cast<Value>(item));
+    }
+  }
+
+  template <std::size_t... Indices>
+  static _TTp makeTypedValues(const store::JoinValues& values,
+                              std::index_sequence<Indices...>) {
+    _TTp result;
+    (copyValues<Indices>(result, values), ...);
+    return result;
+  }
+
+  template <typename Value>
+  void consumeValue(MessageContext context, const Key& key, std::size_t index,
+                    const Value& value) {
+    if (!joinStorage_) {
+      throw std::logic_error("multi-join storage is not initialized");
+    }
+    joinStorage_->joinValue(
+        context, key, index, value,
+        [this, context, key](store::JoinValues& values) mutable {
+          if (values.empty() || values[0].empty()) return false;
+          auto typed = makeTypedValues(
+              values, std::make_index_sequence<std::tuple_size_v<_TTp>>{});
+          auto mutableKey = key;
+          return f_(context, *this, mutableKey, typed,
+                    Collector<_JTp, MultiJoinImpl>(*this));
+        });
+  }
+
+ protected:
+  void produce(MessageContext context, _JTp value) {
+    if (this->hasConsumer()) {
+      this->context().template consume<_JTp>(
+          std::move(context), *this, *this->consumer(),
+          Payload<_JTp>::make(std::move(value)));
+    }
   }
 };
 

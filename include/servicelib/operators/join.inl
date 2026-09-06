@@ -116,22 +116,26 @@ class JoinImpl final : public Join<_TTp, _JTp, _JoinType, _JoinStrategy, _CCp>,
   friend class JoinBuilder;
   template <typename, typename, size_t>
   friend class JoinLinkImpl;
+  template <typename, typename>
+  friend class Collector;
   friend class StreamBuilderContext;
 
   StreamFunction<_JoinFunction, JoinImpl> f_;
-  typename JoinContainerFactory<_JoinType, _Tp, _TTp, _JoinStrategy>::type
-      joinContainer;
+  using LeftArgs = detail::key_value_args<_Tp>;
+  using RightArgs = detail::key_value_args<_TTp>;
+  using Key = typename LeftArgs::key_type;
+  using LeftValue = typename LeftArgs::value_type;
+  using RightValue = typename RightArgs::value_type;
+  std::shared_ptr<store::IJoinStorage<Key>> joinStorage_;
 
  public:
   using topology_value_type = _JTp;
   using Join<_TTp, _JTp, _JoinType, _JoinStrategy, _CCp>::consume;
 
-  void consume(MessageContext ctx,
-               [[maybe_unused]] Payload<_Tp> payload) override {
+  void consume(MessageContext ctx, Payload<_Tp> payload) override {
     [[maybe_unused]] auto activeSpan =
         tracing::StartStreamSpan(ctx, *this, "stream.join");
-    if (this->hasConsumer()) {
-    }
+    consumeValue(ctx, payload.get().first, 0, payload.get().second);
   }
 
   size_t getId() const noexcept override {
@@ -167,6 +171,7 @@ class JoinImpl final : public Join<_TTp, _JTp, _JoinType, _JoinStrategy, _CCp>,
     StreamConsumer<_Tp>::serde_ = serde;
     Join<_TTp, _JTp, _JoinType, _JoinStrategy, _CCp>::resolveDefaultSerde();
     this->env_ = env;
+    initializeStorage(cfg, env);
   }
 
   template <typename T, typename Ctx = JoinImpl>
@@ -179,6 +184,7 @@ class JoinImpl final : public Join<_TTp, _JTp, _JoinType, _JoinStrategy, _CCp>,
     StreamConsumer<_Tp>::serde_ = serde;
     Join<_TTp, _JTp, _JoinType, _JoinStrategy, _CCp>::resolveDefaultSerde();
     this->env_ = env;
+    initializeStorage(cfg, env);
   }
 
   template <typename T, typename F = _JoinFunction, typename Ctx = JoinImpl>
@@ -207,8 +213,12 @@ class JoinImpl final : public Join<_TTp, _JTp, _JoinType, _JoinStrategy, _CCp>,
   }
 
   template <typename _PTp, size_t N = 0>
-  void consumeRight([[maybe_unused]] MessageContext ctx,
-                    [[maybe_unused]] Payload<_PTp> payload) {}
+  void consumeRight(MessageContext ctx, Payload<_PTp> payload) {
+    static_assert(N == 0);
+    static_assert(std::is_same_v<_PTp, _TTp>);
+    consumeValue(std::move(ctx), payload.get().first, 1,
+                 payload.get().second);
+  }
 
   size_t buildTopology(StreamBuilderContext& ctx, size_t id,
                        StreamBuilderContext::TIdsList* splitConsumerIds,
@@ -270,6 +280,68 @@ class JoinImpl final : public Join<_TTp, _JTp, _JoinType, _JoinStrategy, _CCp>,
     static_cast<StreamConsumer<_Tp>&>(*r).copyConsumerSettings(
         static_cast<const StreamConsumer<_Tp>&>(stream));
     return r;
+  }
+
+ private:
+  void initializeStorage(const servicelib::config::JoinStreamConfig& cfg,
+                         IRuntimeEnvironment* env) {
+    if (!env) throw std::invalid_argument("join runtime environment is null");
+    auto storage = store::makeJoinStorage<Key>(
+        cfg.joinStorage, *env, store::makeJoinStorageConfig(cfg));
+    joinStorage_ = std::shared_ptr<store::IJoinStorage<Key>>(std::move(storage));
+    auto& app = _Context::getExecutionEnvironment().getApp();
+    if constexpr (requires { app.registerStorage(joinStorage_); }) {
+      app.registerStorage(joinStorage_);
+    } else {
+      throw std::logic_error(
+          "join runtime environment cannot register storage lifecycle");
+    }
+  }
+
+  template <typename Value>
+  void consumeValue(MessageContext context, const Key& key, std::size_t index,
+                    const Value& value) {
+    if (!joinStorage_) throw std::logic_error("join storage is not initialized");
+    joinStorage_->joinValue(
+        context, key, index, value,
+        [this, context, key](store::JoinValues& values) mutable {
+          const bool hasLeft = !values.empty() && !values[0].empty();
+          const bool hasRight = values.size() > 1 && !values[1].empty();
+          bool canCall = false;
+          if constexpr (_JoinType == JoinTypeEnum::Inner) {
+            canCall = hasLeft && hasRight;
+          } else if constexpr (_JoinType == JoinTypeEnum::Left) {
+            canCall = hasLeft;
+          } else if constexpr (_JoinType == JoinTypeEnum::Right) {
+            canCall = hasRight;
+          } else if constexpr (_JoinType == JoinTypeEnum::Outer) {
+            canCall = true;
+          }
+          if (!canCall) return false;
+
+          std::pair<std::vector<LeftValue>, std::vector<RightValue>> typed;
+          if (!values.empty()) {
+            for (const auto& item : values[0]) {
+              typed.first.push_back(std::any_cast<LeftValue>(item));
+            }
+          }
+          if (values.size() > 1) {
+            for (const auto& item : values[1]) {
+              typed.second.push_back(std::any_cast<RightValue>(item));
+            }
+          }
+          auto mutableKey = key;
+          return f_(context, *this, mutableKey, typed,
+                    Collector<_JTp, JoinImpl>(*this));
+        });
+  }
+
+  void produce(MessageContext context, _JTp value) {
+    if (this->hasConsumer()) {
+      this->context().template consume<_JTp>(
+          std::move(context), *this, *this->consumer(),
+          Payload<_JTp>::make(std::move(value)));
+    }
   }
 
   template <typename T>
