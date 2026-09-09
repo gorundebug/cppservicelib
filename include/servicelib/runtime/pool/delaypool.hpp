@@ -3,7 +3,7 @@
  * C++ streams API — service-wide delayed task scheduler.
  *
  * Mirrors servicelib/runtime/pool/delaypool.go: every accepted call owns an
- * independent timer path, context completion may execute the task early, and
+ * independent deadline, context completion may execute the task early, and
  * an atomic once-claim guarantees that the user function runs exactly once.
  *
  * Copyright (c) 2024 Sergey Alexeev
@@ -19,19 +19,23 @@
 #include <cstdint>
 #include <exception>
 #include <functional>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stop_token>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include <userver/baggage/baggage.hpp>
 #include <userver/concurrent/background_task_storage.hpp>
 #include <userver/engine/async.hpp>
 #include <userver/engine/condition_variable.hpp>
 #include <userver/engine/deadline.hpp>
 #include <userver/engine/mutex.hpp>
-#include <userver/engine/single_use_event.hpp>
+#include <userver/engine/single_consumer_event.hpp>
+#include <userver/engine/sleep.hpp>
 #include <userver/engine/task/cancel.hpp>
 #include <userver/engine/task/current_task.hpp>
 #include <userver/engine/task/local_variable.hpp>
@@ -48,6 +52,10 @@ class DelayPoolImpl final : public IDelayPool {
   enum class PoolState { kCreated, kRunning, kStopping, kStopped, kFailed };
 
   struct SharedState;
+  struct DelayTask;
+  static_assert(std::atomic<DelayTask*>::is_always_lock_free);
+  using TimerQueue = std::multimap<std::chrono::steady_clock::time_point,
+                                   std::shared_ptr<DelayTask>>;
 
   struct DelayTask {
     using CancelCallback = std::stop_callback<std::function<void()>>;
@@ -57,7 +65,21 @@ class DelayPoolImpl final : public IDelayPool {
     std::function<void()> fn;
     std::atomic<bool> claimed{false};
     std::atomic<bool> cancelRequested{false};
-    engine::SingleUseEvent cancelled;
+    // Only coroutine code accesses the timer queue, under SharedState::mu.
+    std::optional<TimerQueue::iterator> queued;
+    std::atomic<bool> admitted{false};
+    std::atomic<bool> cancellationPublished{false};
+    // Intrusive MPSC cancellation inbox. The winning publisher owns these
+    // fields until release-publishing the node; the scheduler consumes it.
+    DelayTask* cancelledNext{};
+    std::shared_ptr<DelayTask> cancellationKeepAlive;
+    bool contextDeadlineWins{};
+
+    // Preserve the same span and baggage capture as CriticalAsyncDetach,
+    // at admission time, even though the coroutine is only created when due.
+    // Allocate the wrapper only when servicelib tracing and sampling are on.
+    std::unique_ptr<userver::utils::impl::SpanWrapCall> tracedCall;
+    std::optional<userver::baggage::Baggage> baggage;
     std::optional<CancelCallback> cancelCallback;
     std::vector<std::unique_ptr<CancelCallback>> externalCancelCallbacks;
   };
@@ -102,8 +124,17 @@ class DelayPoolImpl final : public IDelayPool {
     std::unique_ptr<metrics::Int64Counter> taskCancelledCounter;
     std::unique_ptr<metrics::Int64Counter> taskRejectedCounter;
 
-    // Destroyed before everything captured by scheduled work.
-    std::optional<concurrent::BackgroundTaskStorage> tasks;
+    // Timers and lifecycle share the coroutine-aware mutex above. Native
+    // cancellation callbacks only publish to the atomic inbox and Send().
+    TimerQueue timers;
+    std::atomic<DelayTask*> cancelledHead{nullptr};
+    engine::SingleConsumerEvent queueChanged;
+    bool schedulerStopping = false;
+
+    // Scheduler is separate: activeTasksApprox counts executing callbacks,
+    // not the one service-wide waiter or the queued timer records.
+    std::optional<concurrent::BackgroundTaskStorageCore> tasks;
+    std::optional<engine::TaskWithResult<void>> scheduler;
   };
 
  public:
@@ -135,7 +166,7 @@ class DelayPoolImpl final : public IDelayPool {
         throw PoolAlreadyStartedError();
     }
 
-    ensureTaskStorageLocked(*state);
+    ensureTaskStorageLocked(state);
     state->poolState = PoolState::kRunning;
   }
 
@@ -204,6 +235,19 @@ class DelayPoolImpl final : public IDelayPool {
     task->state = state;
     task->ctx = std::move(ctx);
     task->fn = std::move(fn);
+    task->contextDeadlineWins = contextDeadlineWins;
+    using SpanCall = userver::utils::impl::SpanWrapCall;
+    if (task->ctx.samplingEnabled() && state->env.getTracing()) {
+      task->tracedCall = std::make_unique<SpanCall>(
+          runAt <= now ? "delay-pool-task" : "delay-pool-timer",
+          SpanCall::InheritVariables::kNo,
+          userver::utils::impl::SourceLocation::Current(),
+          SpanCall::HideSpan::kNo);
+    } else if (const auto* baggage =
+                   userver::baggage::kInheritedBaggage.GetOptional()) {
+      // Baggage propagation is independent of tracing/sampling.
+      task->baggage.emplace(*baggage);
+    }
 
     // Callback construction may allocate and may synchronously invoke the
     // callback for an already-stopped token. It does not need the pool lock.
@@ -214,7 +258,9 @@ class DelayPoolImpl final : public IDelayPool {
           bool expected = false;
           if (locked->cancelRequested.compare_exchange_strong(
                   expected, true, std::memory_order_acq_rel)) {
-            locked->cancelled.Send();
+            if (locked->admitted.load(std::memory_order_acquire)) {
+              publishCancellation(locked);
+            }
           }
         }
       };
@@ -248,20 +294,26 @@ class DelayPoolImpl final : public IDelayPool {
       throw PoolNotStartedError();
     }
 
-    ensureTaskStorageLocked(*state);
+    ensureTaskStorageLocked(state);
     ++state->pending;
     try {
       if (runAt <= now) {
-        state->tasks->CriticalAsyncDetach("delay-pool-task",
-                                          [task] { execute(task, false); });
+        // Immediate work still gets its own task, without a timer-queue hop.
+        dispatch(state, task);
       } else {
-        state->tasks->CriticalAsyncDetach(
-            "delay-pool-timer", [task, runAt, contextDeadlineWins] {
-              const auto waitResult = task->cancelled.WaitUntil(
-                  engine::Deadline::FromTimePoint(runAt));
-              execute(task, contextDeadlineWins ||
-                                waitResult != engine::FutureStatus::kTimeout);
-            });
+        // Cancellation may have happened while its callbacks were registered,
+        // before this task had a queue node.
+        const auto key = task->cancelRequested.load(std::memory_order_acquire)
+                             ? std::chrono::steady_clock::time_point::min()
+                             : runAt;
+        const auto it = state->timers.emplace(key, task);
+        task->queued = it;
+        task->admitted.store(true, std::memory_order_release);
+        // Close the race with a cancellation that saw admitted == false.
+        if (task->cancelRequested.load(std::memory_order_acquire)) {
+          publishCancellation(task);
+        }
+        if (it == state->timers.begin()) state->queueChanged.Send();
       }
     } catch (...) {
       --state->pending;
@@ -287,15 +339,137 @@ class DelayPoolImpl final : public IDelayPool {
     }
   }
 
-  static void ensureTaskStorageLocked(SharedState& state) {
-    if (state.tasks) {
+  static void ensureTaskStorageLocked(
+      const std::shared_ptr<SharedState>& state) {
+    if (state->tasks) return;
+    try {
+      state->tasks.emplace();
+      state->scheduler.emplace(
+          engine::CriticalAsyncNoTracing([state] { schedulerLoop(state); }));
+    } catch (...) {
+      state->tasks.reset();
+      state->poolState = PoolState::kFailed;
+      throw;
+    }
+  }
+
+  static void publishCancellation(
+      const std::shared_ptr<DelayTask>& task) noexcept {
+    if (task->cancellationPublished.exchange(true, std::memory_order_acq_rel)) {
       return;
     }
-    try {
-      state.tasks.emplace(engine::current_task::GetTaskProcessor());
-    } catch (...) {
-      state.poolState = PoolState::kFailed;
-      throw;
+    const auto& state = task->state;
+    // No allocation or coroutine mutex in a std::stop_callback. This owning
+    // reference keeps the intrusive node alive even if execution finishes
+    // before the scheduler drains its cancellation notification.
+    task->cancellationKeepAlive = task;
+    auto* head = state->cancelledHead.load(std::memory_order_relaxed);
+    do {
+      task->cancelledNext = head;
+    } while (!state->cancelledHead.compare_exchange_weak(
+        head, task.get(), std::memory_order_release,
+        std::memory_order_relaxed));
+    state->queueChanged.Send();
+  }
+
+  static void drainCancellations(const std::shared_ptr<SharedState>& state) {
+    auto* head =
+        state->cancelledHead.exchange(nullptr, std::memory_order_acquire);
+    while (head) {
+      auto task = std::move(head->cancellationKeepAlive);
+      head = head->cancelledNext;
+      {
+        std::unique_lock<engine::Mutex> lock(state->mu);
+        if (task->queued) {
+          auto node = state->timers.extract(*task->queued);
+          node.key() = std::chrono::steady_clock::time_point::min();
+          task->queued = state->timers.insert(std::move(node));
+        }
+      }
+      // Release ownership outside the queue lock.
+    }
+  }
+
+  static void dispatch(const std::shared_ptr<SharedState>& state,
+                       const std::shared_ptr<DelayTask>& task) {
+    auto callback = engine::CriticalAsyncNoTracing([task] {
+      // Destroy the wrapper on the coroutine it attached to, even when other
+      // references to DelayTask still exist.
+      auto& tracedCall = task->tracedCall;
+      const auto invoke = [&] {
+        execute(task,
+                task->contextDeadlineWins ||
+                    task->cancelRequested.load(std::memory_order_acquire));
+      };
+      if (tracedCall) {
+        (*tracedCall)(invoke);
+        tracedCall.reset();
+      } else {
+        if (task->baggage) {
+          userver::baggage::kInheritedBaggage.Set(std::move(*task->baggage));
+          task->baggage.reset();
+        }
+        invoke();
+      }
+    });
+    state->tasks->Detach(std::move(callback).AsTask());
+  }
+
+  static void schedulerLoop(const std::shared_ptr<SharedState>& state) {
+    // Shutdown is explicit, after all accepted callbacks have drained.
+    engine::TaskCancellationBlocker cancellationBlocker;
+    unsigned dispatched = 0;
+    for (;;) {
+      if (dispatched == 64) {
+        // A large ready batch must not monopolize a task-processor worker.
+        engine::Yield();
+        dispatched = 0;
+      }
+      drainCancellations(state);
+      TimerQueue::node_type ready;
+      engine::Deadline next;
+      {
+        std::unique_lock<engine::Mutex> lock(state->mu);
+        if (state->schedulerStopping) {
+          lock.unlock();
+          // pending == 0 means all callback registrations have been removed.
+          // Drain publications racing the previous exchange before exiting.
+          drainCancellations(state);
+          return;
+        }
+        if (!state->timers.empty()) {
+          const auto it = state->timers.begin();
+          if (it->first <= std::chrono::steady_clock::now()) {
+            it->second->queued.reset();
+            ready = state->timers.extract(it);
+          } else {
+            next = engine::Deadline::FromTimePoint(it->first);
+          }
+        }
+      }
+      if (ready.empty()) {
+        // Send is sticky: an insertion/cancellation between inspection and
+        // waiting cannot be lost. Only this coroutine consumes the event.
+        static_cast<void>(state->queueChanged.WaitForEventUntil(next));
+        continue;
+      }
+
+      const auto task = ready.mapped();
+      try {
+        dispatch(state, task);
+        ++dispatched;
+      } catch (...) {
+        // Admission already succeeded. Do not lose the callback or block the
+        // scheduler inside user code if coroutine allocation temporarily fails.
+        // Reuse the extracted map node, so retry itself needs no allocation.
+        {
+          std::unique_lock<engine::Mutex> lock(state->mu);
+          ready.key() = std::chrono::steady_clock::now();
+          task->queued = state->timers.insert(std::move(ready));
+        }
+        static_cast<void>(
+            state->queueChanged.WaitForEventFor(std::chrono::milliseconds{1}));
+      }
     }
   }
 
@@ -328,6 +502,15 @@ class DelayPoolImpl final : public IDelayPool {
           state->cv.Wait(lock, [state] { return state->pending == 0; }));
     }
 
+    if (state->scheduler) {
+      {
+        std::unique_lock<engine::Mutex> lock(state->mu);
+        state->schedulerStopping = true;
+        state->queueChanged.Send();
+      }
+      state->scheduler->Get();
+      state->scheduler.reset();
+    }
     if (state->tasks) {
       state->tasks->CancelAndWait();
     }

@@ -3,11 +3,14 @@
 #include <mutex>
 #include <stop_token>
 #include <string>
+#include <thread>
+
+#include <userver/tracing/span.hpp>
 #include <utility>
 #include <vector>
 
-#include <userver/engine/mutex.hpp>
 #include <userver/engine/async.hpp>
+#include <userver/engine/mutex.hpp>
 #include <userver/engine/single_consumer_event.hpp>
 #include <userver/engine/sleep.hpp>
 #include <userver/utest/utest.hpp>
@@ -17,6 +20,7 @@
 #include <servicelib/runtime/pool/prioritytaskpool.hpp>
 #include <servicelib/runtime/testlog/testlog.hpp>
 #include <servicelib/runtime/testmetrics/testmetrics.hpp>
+#include <servicelib/runtime/testtracing/testtracing.hpp>
 
 namespace {
 
@@ -68,8 +72,11 @@ class TestConfig final : public servicelib::config::IConfig {
 
 class TestEnvironment final : public servicelib::IServiceEnvironment {
  public:
-  explicit TestEnvironment(int executors_count = 1)
-      : config_(executors_count), runtime_config_(config_) {
+  explicit TestEnvironment(int executors_count = 1,
+                           bool tracing_enabled = false)
+      : config_(executors_count),
+        runtime_config_(config_),
+        tracing_enabled_(tracing_enabled) {
     service_config_.name = kServiceName;
   }
 
@@ -85,7 +92,9 @@ class TestEnvironment final : public servicelib::IServiceEnvironment {
   }
   servicelib::log::Logger& getLogger() override { return log_; }
   servicelib::metrics::Metrics& getMetrics() override { return metrics_; }
-  servicelib::tracing::Tracing* getTracing() override { return nullptr; }
+  servicelib::tracing::Tracing* getTracing() override {
+    return tracing_enabled_ ? &tracing_ : nullptr;
+  }
 
   servicelib::testmetrics::TestMetrics& metrics() { return metrics_; }
 
@@ -93,6 +102,8 @@ class TestEnvironment final : public servicelib::IServiceEnvironment {
   TestConfig config_;
   servicelib::config::RuntimeConfig runtime_config_;
   servicelib::config::ServiceConfig service_config_;
+  bool tracing_enabled_;
+  servicelib::testtracing::TestTracing tracing_;
   servicelib::testlog::TestLog log_;
   servicelib::testmetrics::TestMetrics metrics_;
 };
@@ -535,6 +546,197 @@ UTEST(DelayPool, RejectsExpiredDeadline) {
                               std::chrono::steady_clock::now() - 1ms),
                           1h, [] {}),
                servicelib::pool::PoolCancelledError);
+}
+
+// A due callback must never execute inline on the timer scheduler.
+UTEST(DelayPool, BlockedCallbackDoesNotSerializeOtherCallbacks) {
+  TestEnvironment environment;
+  servicelib::pool::DelayPoolImpl pool{environment};
+  pool.start(servicelib::Context{});
+  StopPoolOnExit stop_guard{pool};
+  userver::engine::SingleConsumerEvent started, release, second;
+  pool.delay(servicelib::Context{}, 1ms, [&] {
+    started.Send();
+    static_cast<void>(release.WaitForEvent());
+  });
+  const bool first_started =
+      started.WaitForEventFor(userver::utest::kMaxTestWaitTime);
+  pool.delay(servicelib::Context{}, 1ms, [&] { second.Send(); });
+  const bool second_finished =
+      second.WaitForEventFor(userver::utest::kMaxTestWaitTime);
+  release
+      .Send();  // release before assertions/RAII shutdown, including failures
+  EXPECT_TRUE(first_started);
+  EXPECT_TRUE(second_finished);
+}
+
+UTEST(DelayPool, EarlierInsertionAndNativeThreadCancellationWakeScheduler) {
+  TestEnvironment environment;
+  servicelib::pool::DelayPoolImpl pool{environment};
+  pool.start(servicelib::Context{});
+  StopPoolOnExit stop_guard{pool};
+  std::stop_source source;
+  userver::engine::SingleConsumerEvent long_task, short_task;
+  pool.delay(servicelib::Context{}.withStopToken(source.get_token()), 1h,
+             [&] { long_task.Send(); });
+  userver::engine::SleepFor(
+      5ms);  // let the scheduler wait for the far deadline
+  pool.delay(servicelib::Context{}, 1ms, [&] { short_task.Send(); });
+  const bool short_finished =
+      short_task.WaitForEventFor(userver::utest::kMaxTestWaitTime);
+  std::thread canceller([&] { source.request_stop(); });
+  canceller.join();
+  EXPECT_TRUE(short_finished);
+  EXPECT_TRUE(long_task.WaitForEventFor(userver::utest::kMaxTestWaitTime));
+}
+
+UTEST(DelayPool, WaitingTimersDoNotCreateCallbackTasksAndReleasePayloads) {
+  TestEnvironment environment;
+  servicelib::pool::DelayPoolImpl pool{environment};
+  pool.start(servicelib::Context{});
+  StopPoolOnExit stop_guard{pool};
+  std::stop_source source;
+  auto payload = std::make_shared<int>(42);
+  const std::weak_ptr<int> weak_payload = payload;
+  std::atomic<int> executions{0};
+  for (int i = 0; i < 1000; ++i) {
+    pool.delay(servicelib::Context{}.withStopToken(source.get_token()), 1h,
+               [payload, &executions] { ++executions; });
+  }
+  payload.reset();
+  EXPECT_EQ(pool.activeTasksApprox(), 0);
+  EXPECT_FALSE(weak_payload.expired());
+  source.request_stop();
+  pool.stop(servicelib::Context{});
+  EXPECT_EQ(executions.load(), 1000);
+  EXPECT_TRUE(weak_payload.expired());
+}
+
+UTEST_MT(DelayPool, CancellationRacesAdmissionAndExpiryExactlyOnce, 4) {
+  TestEnvironment environment;
+  servicelib::pool::DelayPoolImpl pool{environment};
+  pool.start(servicelib::Context{});
+  StopPoolOnExit stop_guard{pool};
+  constexpr int count = 300;
+  std::vector<std::atomic<int>> executions(count);
+  for (int i = 0; i < count; ++i) {
+    std::stop_source source;
+    auto canceller = userver::engine::AsyncNoTracing([source, i]() mutable {
+      if (i % 2) userver::engine::SleepFor(1ms);
+      source.request_stop();
+    });
+    try {
+      pool.delay(servicelib::Context{}.withStopToken(source.get_token()), 1ms,
+                 [&, i] { ++executions[i]; });
+    } catch (const servicelib::pool::PoolCancelledError&) {
+      executions[i] = -1;  // rejected before admission; no callback is owed
+    }
+    canceller.Get();
+  }
+  pool.stop(servicelib::Context{});
+  for (const auto& count : executions) {
+    EXPECT_TRUE(count.load() == 1 || count.load() == -1);
+  }
+}
+
+UTEST(DelayPool, CapturesSchedulingSpanRatherThanSchedulerSpan) {
+  TestEnvironment environment(1, true);
+  servicelib::pool::DelayPoolImpl pool{environment};
+  pool.start(servicelib::Context{});
+  StopPoolOnExit stop_guard{pool};
+  std::string expected_trace, expected_parent, actual_trace, actual_parent;
+  userver::engine::SingleConsumerEvent completed;
+  {
+    userver::tracing::Span parent("delay-request");
+    expected_trace = parent.GetTraceId();
+    expected_parent = parent.GetSpanIdForChildLogs().value_or("");
+    pool.delay(servicelib::Context{}.withSampling(true), 10ms, [&] {
+      const auto& span = userver::tracing::Span::CurrentSpan();
+      actual_trace = span.GetTraceId();
+      actual_parent = span.GetParentId();
+      completed.Send();
+    });
+  }
+  ASSERT_TRUE(completed.WaitForEventFor(userver::utest::kMaxTestWaitTime));
+  EXPECT_EQ(actual_trace, expected_trace);
+  EXPECT_EQ(actual_parent, expected_parent);
+}
+
+UTEST(DelayPool, DisabledTracingOrSamplingDoesNotCreateSpan) {
+  for (const bool tracing_enabled : {false, true}) {
+    TestEnvironment environment(1, tracing_enabled);
+    servicelib::pool::DelayPoolImpl pool{environment};
+    pool.start(servicelib::Context{});
+    StopPoolOnExit stop_guard{pool};
+    userver::engine::SingleConsumerEvent completed;
+    std::atomic<bool> has_span{true};
+    userver::tracing::Span parent("unsampled-request");
+    pool.delay(servicelib::Context{}.withSampling(!tracing_enabled), 1ms, [&] {
+      has_span = userver::tracing::Span::CurrentSpanUnchecked() != nullptr;
+      completed.Send();
+    });
+    ASSERT_TRUE(completed.WaitForEventFor(userver::utest::kMaxTestWaitTime));
+    EXPECT_FALSE(has_span.load());
+  }
+}
+
+UTEST(DelayPool, BaggageSurvivesWhenTracingIsDisabled) {
+  TestEnvironment environment;
+  servicelib::pool::DelayPoolImpl pool{environment};
+  pool.start(servicelib::Context{});
+  StopPoolOnExit stop_guard{pool};
+  auto baggage = userver::baggage::TryMakeBaggage("tenant=acme", {"tenant"});
+  ASSERT_TRUE(baggage);
+  userver::baggage::kInheritedBaggage.Set(std::move(*baggage));
+  userver::engine::SingleConsumerEvent completed;
+  std::string received;
+  pool.delay(servicelib::Context{}, 1ms, [&] {
+    if (const auto* value = userver::baggage::kInheritedBaggage.GetOptional()) {
+      received = value->ToString();
+    }
+    completed.Send();
+  });
+  userver::baggage::kInheritedBaggage.Erase();
+  ASSERT_TRUE(completed.WaitForEventFor(userver::utest::kMaxTestWaitTime));
+  EXPECT_EQ(received, "tenant=acme");
+}
+
+UTEST_MT(DelayPool, ConcurrentStopsDrainQueuedCancellationAndBlockedCallback,
+         4) {
+  TestEnvironment environment;
+  servicelib::pool::DelayPoolImpl pool{environment};
+  pool.start(servicelib::Context{});
+  StopPoolOnExit stop_guard{pool};
+  std::stop_source source;
+  userver::engine::SingleConsumerEvent entered, release;
+  std::atomic<int> executions{0};
+  pool.delay(servicelib::Context{}.withStopToken(source.get_token()), 1h, [&] {
+    ++executions;
+    entered.Send();
+    static_cast<void>(release.WaitForEvent());
+  });
+  std::atomic<int> stopped{0};
+  auto first_stop = userver::engine::AsyncNoTracing([&] {
+    pool.stop(servicelib::Context{});
+    ++stopped;
+  });
+  auto second_stop = userver::engine::AsyncNoTracing([&] {
+    pool.stop(servicelib::Context{});
+    ++stopped;
+  });
+  std::thread canceller([&] { source.request_stop(); });
+  canceller.join();
+  const bool callback_entered =
+      entered.WaitForEventFor(userver::utest::kMaxTestWaitTime);
+  EXPECT_EQ(stopped.load(), 0);
+  release.Send();
+  first_stop.Get();
+  second_stop.Get();
+  EXPECT_TRUE(callback_entered);
+  EXPECT_EQ(stopped.load(), 2);
+  EXPECT_EQ(executions.load(), 1);
+  EXPECT_THROW(pool.delay(servicelib::Context{}, 0ms, [] {}),
+               servicelib::pool::PoolStoppedError);
 }
 
 }  // namespace
