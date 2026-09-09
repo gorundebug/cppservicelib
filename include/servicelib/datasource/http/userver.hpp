@@ -82,7 +82,7 @@ struct PendingResult final {
   std::atomic<bool> doneSent{false};
   userver::engine::SharedMutex lifetimeMutex;
   userver::engine::Mutex callbacksMutex;
-  std::unordered_map<std::string, Callback> callbacks;
+  std::unordered_map<std::string, std::shared_ptr<Callback>> callbacks;
 };
 
 // Passed to EndpointHandler::consumeMessage. Callback returns true to remove
@@ -97,9 +97,12 @@ class ResultContext final {
   explicit ResultContext(std::shared_ptr<Pending> result)
       : result_(std::move(result)) {}
 
+  // The registered callable is retained and may be invoked concurrently.
+  // Mutable state must be synchronized by the handler, as must HandlerState.
   void setResultCallback(std::string messageId, Callback callback) {
+    auto stored = std::make_shared<Callback>(std::move(callback));
     std::lock_guard lock(result_->callbacksMutex);
-    result_->callbacks[std::move(messageId)] = std::move(callback);
+    result_->callbacks[std::move(messageId)] = std::move(stored);
   }
 
   void done() noexcept {
@@ -434,20 +437,20 @@ class UserverEndpoint final : public IUserverEndpoint {
 
     const std::string messageId = handler_.getMessageId(
         context, streamContext_, result->state, payload.get());
-    typename Result::Callback callback;
+    std::shared_ptr<typename Result::Callback> callback;
     {
       std::lock_guard callbacksLock(result->callbacksMutex);
       const auto it = result->callbacks.find(messageId);
       if (it != result->callbacks.end()) callback = it->second;
     }
-    if (!callback) {
+    if (!callback || !*callback) {
       metrics_.unknownMessageId(streamId, messageId);
       tracing::SpanEvent(result->span.get(), "unknown_message_id",
                          {tracing::Attribute::String("message_id", messageId)});
       return;
     }
 
-    if (callback(context, streamContext_, result->state, payload.get(),
+    if ((*callback)(context, streamContext_, result->state, payload.get(),
                  result->data)) {
       bool duplicate = false;
       {

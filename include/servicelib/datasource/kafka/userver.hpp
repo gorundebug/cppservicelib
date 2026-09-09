@@ -18,7 +18,7 @@
 #include <userver/kafka/consumer_scope.hpp>
 #include <userver/kafka/headers.hpp>
 
-#include <servicelib/datasource/localsource/custom.hpp>
+#include <servicelib/datasource/kafka/detail/endpoint.hpp>
 #include <servicelib/runtime/detail/kafka_admin.hpp>
 #include <servicelib/runtime/detail/kafka_context.hpp>
 
@@ -31,7 +31,7 @@ class ConsumerMessage final {
   ConsumerMessage(std::string key, std::string value, std::string topic,
                   std::uint32_t partition, std::int64_t offset,
                   std::function<void()> commit = {},
-                  detail::KafkaHeaders headers = {})
+                  servicelib::detail::KafkaHeaders headers = {})
       : key_(std::move(key)),
         value_(std::move(value)),
         topic_(std::move(topic)),
@@ -45,7 +45,7 @@ class ConsumerMessage final {
   [[nodiscard]] const std::string& topic() const noexcept { return topic_; }
   [[nodiscard]] std::uint32_t partition() const noexcept { return partition_; }
   [[nodiscard]] std::int64_t offset() const noexcept { return offset_; }
-  [[nodiscard]] const detail::KafkaHeaders& headers() const noexcept {
+  [[nodiscard]] const servicelib::detail::KafkaHeaders& headers() const noexcept {
     return headers_;
   }
 
@@ -62,7 +62,7 @@ class ConsumerMessage final {
   std::uint32_t partition_{};
   std::int64_t offset_{};
   std::function<void()> commit_;
-  detail::KafkaHeaders headers_;
+  servicelib::detail::KafkaHeaders headers_;
 };
 
 class ConsumerClient {
@@ -93,13 +93,13 @@ class UserverConsumerClient final : public ConsumerClient {
         std::string topic;
         std::uint32_t partition{};
         std::int64_t offset{};
-        detail::KafkaHeaders headers;
+        servicelib::detail::KafkaHeaders headers;
       };
       std::map<std::uint32_t, std::vector<QueuedMessage>> partitions;
       for (const auto& message : batch) {
         const auto partition =
             static_cast<std::uint32_t>(message.GetPartition());
-        detail::KafkaHeaders headers;
+        servicelib::detail::KafkaHeaders headers;
         for (const auto header : message.GetHeaders()) {
           std::string name{header.name.data(), header.name.size()};
           std::transform(name.begin(), name.end(), name.begin(),
@@ -163,12 +163,12 @@ class UserverConsumerClient final : public ConsumerClient {
 
 namespace detail {
 
-class ProducerAdapter final
-    : public datasource::localsource::DataProducer<ConsumerMessage> {
+class ProducerAdapter final {
  public:
+  using Consumer = std::function<void(MessageContext, Payload<ConsumerMessage>)>;
   explicit ProducerAdapter(ConsumerClient& client) : client_(client) {}
 
-  void start(Context, Consumer consumer) override {
+  void start(Context, Consumer consumer) {
     client_.start([consumer = std::move(consumer)](ConsumerMessage message) {
       auto context =
           servicelib::detail::ContextFromKafkaHeaders(message.headers());
@@ -176,7 +176,7 @@ class ProducerAdapter final
                Payload<ConsumerMessage>::make(std::move(message)));
     });
   }
-  void stop(Context) override { client_.stop(); }
+  void stop(Context) { client_.stop(); }
 
  private:
   ConsumerClient& client_;
@@ -198,7 +198,7 @@ class HandlerAdapter final {
   void consumeMessage(
       MessageContext context, SourceStreamContext<T, R, E>& stream,
       State& state, const ConsumerMessage& message,
-      datasource::localsource::ResultContext<State, T, R, E> result) {
+      ResultContext<State, T, R, E> result) {
     handler_.consumeMessage(std::move(context), stream, state, message,
                             std::move(result));
   }
@@ -224,7 +224,8 @@ class Endpoint final {
  public:
   using Adapter = detail::HandlerAdapter<Handler, T, R, E>;
   using Implementation =
-      datasource::localsource::Endpoint<T, R, Adapter, E, ConsumerMessage>;
+      detail::EndpointState<T, R, Adapter, E, ConsumerMessage,
+                            detail::ProducerAdapter>;
   using Output = typename SourceStreamContext<T, R, E>::Output;
   using ErrorOutput = typename SourceStreamContext<T, R, E>::ErrorOutput;
 
@@ -275,7 +276,7 @@ class Endpoint final {
             // ConsumerScope and AsyncCommit are not thread-safe. As in Go's
             // ConsumeClaim path, finish the per-message lifecycle before the
             // transport callback releases its message/session scope.
-            std::move(errorOutput), true, "kafka.input") {}
+            std::move(errorOutput)) {}
 
  public:
   void start(Context context) {

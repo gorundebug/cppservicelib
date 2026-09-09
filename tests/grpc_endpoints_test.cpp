@@ -102,7 +102,7 @@ class TestEnvironment final : public servicelib::IRuntimeEnvironment {
   servicelib::testmetrics::TestMetrics metrics_;
 };
 
-struct SourceHandler final {
+struct SourceHandler {
   using State = int;
   servicelib::BeginResult<State> beginRequest(
       servicelib::MessageContext context, auto&) {
@@ -144,6 +144,40 @@ struct FakeReader {
 };
 
 struct FakeReaderWriter : FakeReader, FakeWriter {};
+
+struct RetainedSourceHandler final : SourceHandler {
+  void consumeMessage(servicelib::MessageContext context, auto& sc, State&,
+                      const std::string& request, auto result, auto&) {
+    result.setResultCallback(
+        "result", [result, calls = 0](servicelib::MessageContext, auto&, State&,
+                                     const std::string&, auto& sender) mutable {
+          sender.send(std::to_string(++calls));
+          if (calls == 2) result.done();
+          return calls == 2;
+        });
+    sc.collect(context, request);
+    sc.collect(std::move(context), request);
+  }
+};
+
+UTEST(GrpcDataSource, RetainsCallbackAcrossResults) {
+  TestEnvironment environment;
+  using Server = servicelib::datasource::grpc::ServerStreamingEndpoint<
+      std::string, std::string, std::string, std::string, RetainedSourceHandler>;
+  Server* endpointPtr{};
+  Server endpoint{environment, 2, RetainedSourceHandler{},
+                  [&](servicelib::MessageContext context,
+                      servicelib::Payload<std::string> value) {
+                    endpointPtr->consumeResult(std::move(context), std::move(value));
+                  }, true};
+  endpointPtr = &endpoint;
+  endpoint.start(servicelib::Context{});
+  FakeWriter writer;
+  endpoint.handle(servicelib::MessageContext{}.withStreamId("retained"),
+                  "request", writer);
+  endpoint.stop(servicelib::Context{});
+  EXPECT_EQ(writer.values, (std::vector<std::string>{"1", "2"}));
+}
 
 UTEST(GrpcTracing, RequiresExplicitSampledTraceParent) {
   using servicelib::tracing::SampledTraceParent;

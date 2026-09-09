@@ -16,6 +16,7 @@
 #include <servicelib/runtime/environment/environment.hpp>
 #include <servicelib/runtime/testlog/testlog.hpp>
 #include <servicelib/runtime/testmetrics/testmetrics.hpp>
+#include <servicelib/runtime/testtracing/testtracing.hpp>
 
 #if __has_include(<librdkafka/rdkafka_mock.h>)
 #include <librdkafka/rdkafka_mock.h>
@@ -137,7 +138,8 @@ class TestEnvironment final : public servicelib::IRuntimeEnvironment {
   }
   servicelib::log::Logger& getLogger() override { return log_; }
   servicelib::metrics::Metrics& getMetrics() override { return metrics_; }
-  servicelib::tracing::Tracing* getTracing() override { return nullptr; }
+  servicelib::tracing::Tracing* getTracing() override { return tracingEngine; }
+  servicelib::tracing::Tracing* tracingEngine{};
   [[nodiscard]] std::size_t serviceConfigReads() const noexcept {
     return serviceConfigReads_.load(std::memory_order_relaxed);
   }
@@ -205,6 +207,68 @@ UTEST(CustomDataSource, RunsProducerAndHandlerLifecycle) {
   done.Wait();
   endpoint.stop(servicelib::Context{});
   EXPECT_EQ(observed, "input");
+}
+
+struct MultiResultSourceHandler final {
+  using State = int;
+  userver::engine::SingleUseEvent* done;
+  std::atomic<int>* observed;
+  int concurrency(auto&) { return 0; }
+  servicelib::BeginResult<State> beginRequest(
+      servicelib::MessageContext context, auto&) {
+    return {std::move(context), 0};
+  }
+  void consumeMessage(servicelib::MessageContext context, auto& stream, State&,
+                      const std::string&, auto result) {
+    result.setResultCallback(
+        "answer", [result, observed = observed, calls = 0](servicelib::MessageContext,
+                                                auto&, State& state,
+                                                const int& value) mutable {
+          observed->fetch_add(value, std::memory_order_relaxed);
+          EXPECT_EQ(++calls, ++state);
+          if (state == 2) result.done();
+          return state == 2;
+        });
+    stream.collect(context, std::string{"first"});
+    stream.collect(std::move(context), std::string{"second"});
+  }
+  std::string getMessageId(servicelib::MessageContext, auto&, State&,
+                           const int&) {
+    return "answer";
+  }
+  void endRequest(servicelib::MessageContext, auto&, std::exception_ptr error,
+                  State& state) noexcept {
+    EXPECT_FALSE(error);
+    EXPECT_EQ(state, 2);
+    done->Send();
+  }
+};
+
+UTEST(CustomDataSource, SupportsMultiPushAndPersistentResultCallback) {
+  TestEnvironment environment;
+  OneValueProducer producer;
+  userver::engine::SingleUseEvent done;
+  std::atomic<int> observed{0};
+  using Endpoint = servicelib::datasource::localsource::Endpoint<
+      std::string, int, MultiResultSourceHandler>;
+  Endpoint* endpointPtr = nullptr;
+  Endpoint endpoint{
+      environment,
+      1,
+      producer,
+      MultiResultSourceHandler{&done, &observed},
+      [&](servicelib::MessageContext context,
+          servicelib::Payload<std::string> value) {
+        endpointPtr->consumeResult(
+            std::move(context), servicelib::Payload<int>::make(
+                                    value.get() == "first" ? 10 : 20));
+      },
+      true};
+  endpointPtr = &endpoint;
+  endpoint.start(servicelib::Context{});
+  done.Wait();
+  endpoint.stop(servicelib::Context{});
+  EXPECT_EQ(observed.load(std::memory_order_relaxed), 30);
 }
 
 struct CorrelatingSourceHandler final {
@@ -587,10 +651,11 @@ class FakeKafkaConsumer final
  public:
   void start(Callback callback) override {
     callback(servicelib::datasource::kafka::ConsumerMessage{
-        "key", "payload", "events", 2, 9, [this] { committed = true; }});
+        "key", "payload", "events", 2, 9, [this] { committed = true; }, headers});
   }
   void stop() noexcept override {}
   std::atomic<bool> committed{false};
+  servicelib::detail::KafkaHeaders headers;
 };
 
 template <typename T, typename R, typename E = std::exception_ptr>
@@ -659,6 +724,94 @@ UTEST(KafkaDataSource, CopiesRecordAndExposesUserverCommit) {
   endpoint->stop(servicelib::Context{});
   EXPECT_EQ(observed, "events:key:payload");
   EXPECT_TRUE(consumer.committed.load());
+}
+
+class CorrelatedKafkaInput final {
+ public:
+  int getEndpointId() const noexcept { return 3; }
+  std::size_t getConfigId() const noexcept { return 0; }
+  const CorrelatedKafkaInput* getResultStream() const noexcept { return this; }
+  void setResultConsumer(std::function<void(servicelib::MessageContext,
+                                           servicelib::Payload<int>)> callback) {
+    resultConsumer = std::move(callback);
+  }
+  void consume(servicelib::MessageContext context, servicelib::Payload<std::string>) {
+    lastContext = context;
+    resultConsumer(std::move(context), servicelib::Payload<int>::make(1));
+  }
+  void consumeError(servicelib::MessageContext,
+                    servicelib::Payload<std::exception_ptr>) {}
+  servicelib::MessageContext lastContext;
+  std::function<void(servicelib::MessageContext, servicelib::Payload<int>)>
+      resultConsumer;
+};
+
+struct CorrelatedKafkaHandler final {
+  using State = int;
+  userver::engine::SingleUseEvent* done;
+  std::vector<std::string>* events;
+  int concurrency(auto&) { return 1; }
+  servicelib::BeginResult<State> beginRequest(servicelib::MessageContext context,
+                                             auto&) {
+    events->push_back("begin");
+    return {std::move(context), 0};
+  }
+  void consumeMessage(servicelib::MessageContext context, auto& stream, State&,
+                      const servicelib::datasource::kafka::ConsumerMessage& message,
+                      servicelib::datasource::localsource::ResultContext<
+                          State, std::string, int, std::exception_ptr> result) {
+    // Explicit legacy type above verifies source compatibility for handlers.
+    result.setResultCallback("result", [message, result, events = events, calls = 0](
+        servicelib::MessageContext, auto&, State&, const int&) mutable {
+      events->push_back("result" + std::to_string(++calls));
+      if (calls != 2) return false;
+      message.commit();
+      result.done();
+      return true;
+    });
+    stream.collect(context, std::string{"first"});
+    stream.collect(std::move(context), std::string{"second"});
+    events->push_back("consume");
+  }
+  std::string getMessageId(servicelib::MessageContext, auto&, State&, const int&) {
+    return "result";
+  }
+  void endRequest(servicelib::MessageContext, auto&, std::exception_ptr error,
+                  State&) noexcept {
+    EXPECT_FALSE(error);
+    events->push_back("end");
+    done->Send();
+  }
+};
+
+UTEST(KafkaDataSource, RetainsCallbackAndRejectsResultsAfterCompletion) {
+  servicelib::testtracing::TestTracing tracing;
+  TestEnvironment environment;
+  environment.tracingEngine = &tracing;
+  FakeKafkaConsumer consumer;
+  consumer.headers = {{"x-trace", "1"}, {"traceparent",
+      "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"}};
+  userver::engine::SingleUseEvent done;
+  std::vector<std::string> events;
+  CorrelatedKafkaInput input;
+  auto endpoint = servicelib::datasource::kafka::Endpoint<
+      std::string, int, CorrelatedKafkaHandler>::make(
+      environment, input, consumer, CorrelatedKafkaHandler{&done, &events});
+  endpoint->start(servicelib::Context{});
+  done.Wait();
+  endpoint->stop(servicelib::Context{});
+  EXPECT_TRUE(consumer.committed.load());
+  input.resultConsumer(input.lastContext, servicelib::Payload<int>::make(3));
+  EXPECT_EQ(events, (std::vector<std::string>{
+      "begin", "result1", "result2", "consume", "end"}));
+  const auto spans = tracing.spans();
+  ASSERT_EQ(spans.size(), 1U);
+  EXPECT_EQ(spans.front().name, "kafka.input");
+  std::vector<std::string> traceEvents;
+  for (const auto& event : spans.front().events) traceEvents.push_back(event.name);
+  EXPECT_EQ(traceEvents, (std::vector<std::string>{
+      "begin_request", "result_consumed", "done_called", "result_consumed",
+      "consume_message", "done_received"}));
 }
 
 struct WaitingKafkaSourceHandler final {

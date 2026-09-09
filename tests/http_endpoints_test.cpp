@@ -255,6 +255,48 @@ UTEST(HttpDataSource, CorrelatesPipelineResultAndPropagatesStreamId) {
   endpoint.stop(servicelib::Context{});
 }
 
+struct RetainedCallbackHandler final {
+  using State = int;
+  using Request = std::string;
+  using Response = std::string;
+  servicelib::BeginResult<State> beginRequest(servicelib::MessageContext context, auto&, auto&) {
+    return {std::move(context), 0};
+  }
+  void consumeMessage(servicelib::MessageContext context, auto& stream, State&, auto&, auto result) {
+    result.setResultCallback("response",
+        [result, count = 0](servicelib::MessageContext, auto&, State&,
+            const std::string&, auto& data) mutable {
+          data.responseBody += std::to_string(++count);
+          if (count == 2) result.done();
+          return false;
+        });
+    stream.collect(context, std::string{"first"});
+    stream.collect(std::move(context), std::string{"second"});
+  }
+  std::string getMessageId(servicelib::MessageContext, auto&, State&, const std::string&) {
+    return "response";
+  }
+  void endRequest(servicelib::MessageContext, auto&, std::exception_ptr, State&, auto&) noexcept {}
+};
+
+UTEST(HttpDataSource, RegisteredCallbackRetainsItsStateAcrossResults) {
+  TestEnvironment environment;
+  using Endpoint = servicelib::datasource::http::UserverEndpoint<
+      std::string, std::string, RetainedCallbackHandler>;
+  Endpoint* pointer{};
+  Endpoint endpoint{environment, 1, RetainedCallbackHandler{},
+      [&](servicelib::MessageContext context, servicelib::Payload<std::string> value) {
+        pointer->consumeResult(std::move(context), std::move(value));
+      }, true};
+  pointer = &endpoint;
+  endpoint.start(servicelib::Context{});
+  auto request = userver::server::http::HttpRequestBuilder{}
+      .SetMethod(userver::server::http::HttpMethod::kPost)
+      .SetRequestPath("/messages").Build();
+  EXPECT_EQ(endpoint.handle(*request), "12");
+  endpoint.stop(servicelib::Context{});
+}
+
 struct NoResultSourceHandler {
   using State = int;
   using Request = std::string;
