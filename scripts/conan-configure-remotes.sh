@@ -12,9 +12,13 @@ if [[ -n "${DEPENDENCY_CONAN_REMOTE_URL:-}" ]]; then
     [[ -n "$remote" ]] || continue
     conan remote remove "$remote" >/dev/null
   done < <(conan remote list | sed -n 's/: .*//p')
+  hosted_url=${DEPENDENCY_CONAN_UPLOAD_URL:-}
+  if [[ -n "$hosted_url" ]]; then
+    conan remote add dependency-cache-write "$hosted_url" --insecure
+  fi
   conan remote add dependency-proxy "$DEPENDENCY_CONAN_REMOTE_URL" --insecure
   if [[ "${DEPENDENCY_CONAN_PUBLISH:-0}" == "1" ]]; then
-    upload_url=${DEPENDENCY_CONAN_UPLOAD_URL:?DEPENDENCY_CONAN_UPLOAD_URL is required when DEPENDENCY_CONAN_PUBLISH=1}
+    : "${hosted_url:?DEPENDENCY_CONAN_UPLOAD_URL is required when DEPENDENCY_CONAN_PUBLISH=1}"
     credential_file=${DEPENDENCY_CONAN_CREDENTIAL_FILE:-/run/secrets/dependency_conan_credential}
     if [[ ! -s "$credential_file" ]]; then
       echo "Conan publisher credential is missing: $credential_file" >&2
@@ -26,7 +30,6 @@ if [[ -n "${DEPENDENCY_CONAN_REMOTE_URL:-}" ]]; then
       echo "Conan publisher credential must contain username and password" >&2
       exit 2
     fi
-    conan remote add dependency-cache-write "$upload_url" --insecure
     "$dependency_retry" conan remote login dependency-cache-write \
       "$username" -p "$password"
   fi

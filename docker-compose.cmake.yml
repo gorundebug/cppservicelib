@@ -17,7 +17,7 @@ services:
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
         PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-}
       additional_contexts:
-        userver-source: ${USERVER_SOURCE_CONTEXT:-https://github.com/userver-framework/userver.git#c9f77729c0edce7e423def2d4a4450aa7fc9d259}
+        userver-source: ${USERVER_SOURCE_CONTEXT:?initialize it with scripts/dependency-proxy-env.sh}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     working_dir: /workspace

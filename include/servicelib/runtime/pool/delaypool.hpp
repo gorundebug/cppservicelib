@@ -240,7 +240,6 @@ class DelayPoolImpl final : public IDelayPool {
     if (task->ctx.samplingEnabled() && state->env.getTracing()) {
       task->tracedCall = std::make_unique<SpanCall>(
           runAt <= now ? "delay-pool-task" : "delay-pool-timer",
-          SpanCall::InheritVariables::kNo,
           userver::utils::impl::SourceLocation::Current(),
           SpanCall::HideSpan::kNo);
     } else if (const auto* baggage =

@@ -262,7 +262,7 @@ class Endpoint final {
     // Cancelling the wrapper task can therefore release the buffers while the
     // broker thread is still sending them.  Stop accepting new messages and
     // drain the already accepted deliveries instead.
-    tasks_.CloseAndWaitDebug();
+    tasks_.WaitAndDisposeSlow();
   }
 
   void consume(MessageContext context, Payload<T> payload) {
