@@ -72,7 +72,11 @@ servicelib::CallerBase::Params callerParams() {
 
 class ImmediateTaskPool final : public servicelib::pool::ITaskPool {
  public:
-  const std::string& getName() const noexcept override { return name_; }
+  const std::string& getName() const noexcept override {
+    ++nameReads;
+    return name_;
+  }
+  mutable std::size_t nameReads{};
   int getExecutorsCount() const override { return 1; }
   void start(servicelib::Context) override {}
   void stop(servicelib::Context) override {}
@@ -91,7 +95,11 @@ class ImmediateTaskPool final : public servicelib::pool::ITaskPool {
 class ImmediatePriorityPool final
     : public servicelib::pool::IPriorityTaskPool {
  public:
-  const std::string& getName() const noexcept override { return name_; }
+  const std::string& getName() const noexcept override {
+    ++nameReads;
+    return name_;
+  }
+  mutable std::size_t nameReads{};
   int getExecutorsCount() const override { return 1; }
   void start(servicelib::Context) override {}
   void stop(servicelib::Context) override {}
@@ -388,6 +396,7 @@ UTEST(Operators, CallerSemanticsDispatchPreserveContextPriorityAndStatistics) {
   EXPECT_TRUE(task.isAsync());
   EXPECT_FALSE(taskPool.lastCancelled);
   EXPECT_EQ(task.statistics().count(), 1);
+  EXPECT_EQ(taskPool.nameReads, 0);
 
   ImmediatePriorityPool priorityPool;
   servicelib::PriorityTaskPoolCaller<int> priority{
@@ -402,6 +411,7 @@ UTEST(Operators, CallerSemanticsDispatchPreserveContextPriorityAndStatistics) {
                    servicelib::Payload<int>::make(5));
   EXPECT_EQ(priorityPool.lastPriority, 0);
   EXPECT_EQ(priority.statistics().count(), 2);
+  EXPECT_EQ(priorityPool.nameReads, 0);
 
   servicelib::ParallelCaller<int> parallel{sink, app, callerParams()};
   parallel.consume(servicelib::MessageContext{}.withStreamId("parallel"),

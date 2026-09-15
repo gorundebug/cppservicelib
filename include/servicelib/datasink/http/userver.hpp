@@ -7,6 +7,8 @@
  */
 #pragma once
 
+#include <servicelib/runtime/stream_tracing.hpp>
+
 #include <atomic>
 #include <chrono>
 #include <exception>
@@ -155,7 +157,7 @@ class UserverEndpoint final : public IEndpoint {
                   Handler handler)
       : environment_(stream.environment()),
         endpointId_(stream.endpointId()),
-        streamName_(resolveStreamName(environment_, stream.streamConfigId())),
+        streamIdentity_(resolveStreamIdentity(environment_, stream.streamConfigId())),
         endpointName_(endpointConfig(environment_, endpointId_).name),
         serviceName_(resolveServiceName(environment_)),
         client_(client),
@@ -289,7 +291,9 @@ class UserverEndpoint final : public IEndpoint {
     return tracing::StartSpanInPlace(
         context, tracer.get(), "http.output",
         {
-            tracing::Attribute::String("stream", streamName_),
+            tracing::Attribute::String("stream", streamIdentity_.name),
+            tracing::Attribute::String("pipeline", streamIdentity_.pipeline),
+            tracing::Attribute::String("component", streamIdentity_.component),
             tracing::Attribute::String("endpoint", endpointName_),
         });
   }
@@ -302,13 +306,15 @@ class UserverEndpoint final : public IEndpoint {
                        {tracing::Attribute::String("error", message)});
   }
 
-  [[nodiscard]] static std::string resolveStreamName(
+  [[nodiscard]] static StreamTraceIdentity resolveStreamIdentity(
       const IServiceEnvironment& environment, std::size_t streamConfigId) {
     const auto runtime = environment.getRuntimeConfigSnapshot();
     if (!runtime || streamConfigId == 0) return {};
     const auto stream = runtime->GetStreamConfigByID(
         static_cast<int>(streamConfigId));
-    return stream ? stream->GetName() : std::string{};
+    return stream ? StreamTraceIdentity{stream->GetName(), stream->GetPipeline(),
+                                        stream->GetComponent()}
+                  : StreamTraceIdentity{};
   }
 
   [[nodiscard]] static std::string resolveServiceName(
@@ -355,7 +361,7 @@ class UserverEndpoint final : public IEndpoint {
 
   IServiceEnvironment& environment_;
   int endpointId_;
-  std::string streamName_;
+  StreamTraceIdentity streamIdentity_;
   std::string endpointName_;
   std::string serviceName_;
   Client& client_;

@@ -18,6 +18,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 #include <userver/engine/task/task.hpp>
 #include <userver/utils/async.hpp>
@@ -55,6 +56,8 @@ class CallerBase {
   struct Params {
     std::string sourceName;
     std::string consumerName;
+    std::string pipeline;
+    std::string component;
     std::shared_ptr<tracing::Tracer> tracer;  // nullable: tracing disabled
     bool metricsEnabled{true};
     std::unique_ptr<metrics::Int64Counter>
@@ -64,9 +67,19 @@ class CallerBase {
   explicit CallerBase(Params params)
       : sourceName_(std::move(params.sourceName)),
         consumerName_(std::move(params.consumerName)),
+        pipeline_(std::move(params.pipeline)),
+        component_(std::move(params.component)),
         tracer_(std::move(params.tracer)),
         metricsEnabled_(params.metricsEnabled),
-        messagesCounter_(std::move(params.messagesCounter)) {}
+        messagesCounter_(std::move(params.messagesCounter)) {
+    if (tracer_) {
+      callAttributes_.reserve(6);
+      callAttributes_.push_back(tracing::Attribute::String("from", sourceName_));
+      callAttributes_.push_back(tracing::Attribute::String("pipeline", pipeline_));
+      callAttributes_.push_back(tracing::Attribute::String("component", component_));
+      callAttributes_.push_back(tracing::Attribute::String("to", consumerName_));
+    }
+  }
 
   virtual ~CallerBase() = default;
   virtual bool isAsync() const noexcept = 0;
@@ -89,6 +102,12 @@ class CallerBase {
     return tracer_ != nullptr && tracing::SamplingEnabled(context);
   }
 
+  void configureCallAttributes(std::string_view type, std::string_view poolName = {}) {
+    if (!tracer_) return;
+    if (!type.empty()) callAttributes_.push_back(tracing::Attribute::String("type", std::string{type}));
+    if (!poolName.empty()) callAttributes_.push_back(tracing::Attribute::String("taskpoolname", std::string{poolName}));
+  }
+
   [[nodiscard]] tracing::ActiveSpan startCallSpan(
       MessageContext& context, std::string_view type = {},
       std::string_view poolName = {}) const {
@@ -98,26 +117,29 @@ class CallerBase {
     if (type.empty()) {
       return tracing::StartSpanInPlace(
           context, tracer_.get(), "stream.call",
-          {tracing::Attribute::String("from", sourceName_),
-           tracing::Attribute::String("to", consumerName_)});
+          std::span<const tracing::Attribute>{callAttributes_});
     }
     if (poolName.empty()) {
       return tracing::StartSpanInPlace(
           context, tracer_.get(), "stream.call",
           {tracing::Attribute::String("from", sourceName_),
+           tracing::Attribute::String("pipeline", pipeline_),
+           tracing::Attribute::String("component", component_),
            tracing::Attribute::String("to", consumerName_),
            tracing::Attribute::String("type", std::string{type})});
     }
     return tracing::StartSpanInPlace(
         context, tracer_.get(), "stream.call",
         {tracing::Attribute::String("from", sourceName_),
-         tracing::Attribute::String("to", consumerName_),
+         tracing::Attribute::String("pipeline", pipeline_),
+           tracing::Attribute::String("component", component_),
+           tracing::Attribute::String("to", consumerName_),
          tracing::Attribute::String("type", std::string{type}),
          tracing::Attribute::String("taskpoolname", std::string{poolName})});
   }
 
   [[nodiscard]] std::shared_ptr<tracing::ActiveSpan> startAsyncCallSpan(
-      MessageContext& context, std::string_view type,
+      MessageContext& context, std::string_view type = {},
       std::string_view poolName = {}) const {
     if (!samplingEnabled(context)) {
       return {};
@@ -126,8 +148,11 @@ class CallerBase {
         startCallSpan(context, type, poolName));
   }
 
+  std::vector<tracing::Attribute> callAttributes_;
   std::string sourceName_;
   std::string consumerName_;
+  std::string pipeline_;
+  std::string component_;
   std::shared_ptr<tracing::Tracer> tracer_;
   bool metricsEnabled_{};
   std::unique_ptr<metrics::Int64Counter> messagesCounter_;
@@ -160,7 +185,10 @@ class DirectCaller final : public Caller<T> {
 
   void consume(MessageContext ctx, Payload<T> payload) override {
     this->recordMessage();
-    [[maybe_unused]] auto activeSpan = this->startCallSpan(ctx);
+    tracing::ActiveSpan activeSpan;
+    if (this->samplingEnabled(ctx)) {
+      activeSpan = this->startCallSpan(ctx);
+    }
     consumer_.consume(std::move(ctx), std::move(payload));
   }
 
@@ -183,11 +211,16 @@ class TaskPoolCaller final : public Caller<T> {
       : Caller<T>(std::move(params)),
         consumer_(consumer),
         pool_(pool),
-        logger_(logger) {}
+        logger_(logger) {
+    if (this->tracer_) this->configureCallAttributes("taskpool", pool_.getName());
+  }
 
   void consume(MessageContext ctx, Payload<T> payload) override {
     this->recordMessage();
-    auto activeSpan = this->startAsyncCallSpan(ctx, "taskpool", pool_.getName());
+    std::shared_ptr<tracing::ActiveSpan> activeSpan;
+    if (this->samplingEnabled(ctx)) {
+      activeSpan = this->startAsyncCallSpan(ctx);
+    }
     try {
       pool_.addTask(ctx, [this, ctx, p = std::move(payload),
                           activeSpan = std::move(activeSpan)]() mutable {
@@ -229,13 +262,18 @@ class PriorityTaskPoolCaller final : public Caller<T> {
         consumer_(consumer),
         pool_(pool),
         priority_(priority),
-        logger_(logger) {}
+        logger_(logger) {
+    if (this->tracer_) this->configureCallAttributes("prioritytaskpool", pool_.getName());
+  }
 
   void consume(MessageContext ctx, Payload<T> payload) override {
     this->recordMessage();
     const int prio = ctx.hasPriority() ? ctx.priority() : priority_;
-    auto activeSpan =
-        this->startAsyncCallSpan(ctx, "prioritytaskpool", pool_.getName());
+    std::shared_ptr<tracing::ActiveSpan> activeSpan;
+    if (this->samplingEnabled(ctx)) {
+      activeSpan =
+          this->startAsyncCallSpan(ctx);
+    }
     try {
       pool_.addTask(ctx, prio,
                     [this, ctx, p = std::move(payload),
@@ -274,11 +312,16 @@ class ParallelCaller final : public Caller<T> {
                  CallerBase::Params params)
       : Caller<T>(std::move(params)),
         consumer_(consumer),
-        environment_(environment) {}
+        environment_(environment) {
+    this->configureCallAttributes("parallel");
+  }
 
   void consume(MessageContext ctx, Payload<T> payload) override {
     this->recordMessage();
-    auto activeSpan = this->startAsyncCallSpan(ctx, "parallel");
+    std::shared_ptr<tracing::ActiveSpan> activeSpan;
+    if (this->samplingEnabled(ctx)) {
+      activeSpan = this->startAsyncCallSpan(ctx);
+    }
     environment_.parallel([this, ctx, p = std::move(payload),
                            activeSpan = std::move(activeSpan)]() mutable {
       (void)activeSpan;
@@ -333,6 +376,8 @@ std::unique_ptr<Caller<T>> makeCallerFromEnv(
     }
     if (const auto target = runtimeConfig->GetStreamConfigByID(link.to)) {
       params.consumerName = target->GetName();
+      params.pipeline = target->GetPipeline();
+      params.component = target->GetComponent();
     }
   }
   if (!sourceNameOverride.empty()) {
@@ -345,6 +390,8 @@ std::unique_ptr<Caller<T>> makeCallerFromEnv(
         {"service", serviceConfig ? serviceConfig->name : std::string()},
         {"from", params.sourceName},
         {"to", params.consumerName},
+        {"pipeline", params.pipeline},
+        {"component", params.component},
     };
     auto scope = env->getMetrics().scope("stream", labels);
     params.messagesCounter = scope->counter(

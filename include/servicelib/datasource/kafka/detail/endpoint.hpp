@@ -1,5 +1,6 @@
 #pragma once
 
+#include <servicelib/runtime/stream_tracing.hpp>
 #include <atomic>
 #include <cstddef>
 #include <cstdlib>
@@ -51,7 +52,7 @@ class EndpointState final {
                 bool hasResult, std::string connectorName, std::string endpointName,
                 ErrorOutput errorOutput)
       : environment_(environment), endpointId_(endpointId),
-        streamName_(resolveStreamName(environment, streamConfigId)),
+        streamIdentity_(resolveStreamIdentity(environment, streamConfigId)),
         endpointName_(std::move(endpointName)), producer_(producer),
         ownedHandler_(std::move(handler)), handler_(&*ownedHandler_),
         streamContext_(std::move(output), std::move(errorOutput)),
@@ -207,7 +208,9 @@ class EndpointState final {
       startedSpan = tracing::StartSpanInPlace(
           context, tracer.get(), "kafka.input",
           {
-              tracing::Attribute::String("stream", streamName_),
+              tracing::Attribute::String("stream", streamIdentity_.name),
+            tracing::Attribute::String("pipeline", streamIdentity_.pipeline),
+            tracing::Attribute::String("component", streamIdentity_.component),
               tracing::Attribute::String("endpoint", endpointName_),
           });
     }
@@ -333,17 +336,18 @@ class EndpointState final {
     metrics_.requestEnd(startedAt, error);
   }
 
-  static std::string resolveStreamName(
+  static StreamTraceIdentity resolveStreamIdentity(
       const IServiceEnvironment& environment, int streamConfigId) {
     const auto runtime = environment.getRuntimeConfigSnapshot();
     if (!runtime || streamConfigId == 0) return {};
     const auto stream = runtime->GetStreamConfigByID(streamConfigId);
-    return stream ? stream->GetName() : std::string{};
+    return stream ? StreamTraceIdentity{stream->GetName(), stream->GetPipeline(), stream->GetComponent()}
+                  : StreamTraceIdentity{};
   }
 
   IServiceEnvironment& environment_;
   int endpointId_;
-  std::string streamName_;
+  StreamTraceIdentity streamIdentity_;
   std::string endpointName_;
   Producer& producer_;
   std::optional<Handler> ownedHandler_;

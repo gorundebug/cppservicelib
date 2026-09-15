@@ -106,7 +106,7 @@ class MultiJoinImpl final : public MultiJoin<_TTp, _JTp, _JoinStrategy, _CCp>,
     this->setConfigIdentity(cfg);
     StreamConsumer<_Tp>::serde_ = serde;
     MultiJoin<_TTp, _JTp, _JoinStrategy, _CCp>::resolveDefaultSerde();
-    this->env_ = env;
+    this->setEnv(env);
     initializeStorage(cfg, env);
   }
 

@@ -66,7 +66,7 @@ class UserverSpan final : public tracing::Span {
     span_.reset();
   }
 
-  void setAttributes(std::initializer_list<tracing::Attribute> attrs) override {
+  void setAttributes(tracing::AttributeView attrs) override {
     std::lock_guard lock(mutex_);
     if (!span_) {
       return;
@@ -105,7 +105,7 @@ class UserverSpan final : public tracing::Span {
   }
 
   void addEvent(std::string_view name,
-                std::initializer_list<tracing::Attribute> attrs) override {
+                tracing::AttributeView attrs) override {
     std::lock_guard lock(mutex_);
     if (!span_) {
       return;
@@ -171,7 +171,7 @@ class UserverTracer final : public tracing::Tracer {
  public:
   std::shared_ptr<tracing::Span> start(
       std::string_view spanName,
-      std::initializer_list<tracing::Attribute> attrs) const override {
+      tracing::AttributeView attrs) const override {
     auto span = std::make_shared<UserverSpan>(
         ::userver::tracing::Span(std::string(spanName)),
         std::string{::userver::tracing::GetInheritedOtelTraceState()});
@@ -192,7 +192,7 @@ class UserverTracer final : public tracing::Tracer {
 
   std::shared_ptr<tracing::Span> startChildOf(
       std::string_view spanName, const tracing::SpanContext& parent,
-      std::initializer_list<tracing::Attribute> attrs) const override {
+      tracing::AttributeView attrs) const override {
     if (!parent.valid) {
       return start(spanName, attrs);
     }
@@ -206,7 +206,7 @@ class UserverTracer final : public tracing::Tracer {
 
   std::shared_ptr<tracing::Span> startDetachedChildOf(
       std::string_view spanName, const tracing::SpanContext& parent,
-      std::initializer_list<tracing::Attribute> attrs) const override {
+      tracing::AttributeView attrs) const override {
     auto userverSpan = ::userver::tracing::Span::MakeSpan(
         std::string(spanName), parent.valid ? parent.traceId : std::string{},
         parent.valid ? parent.spanId : std::string{});

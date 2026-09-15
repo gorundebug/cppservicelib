@@ -6,6 +6,7 @@
  */
 #pragma once
 
+#include <servicelib/runtime/stream_tracing.hpp>
 #include <atomic>
 #include <chrono>
 #include <exception>
@@ -162,7 +163,7 @@ class UserverEndpoint final : public IUserverEndpoint {
                   bool hasResult, ErrorOutput errorOutput = {})
       : environment_(environment),
         endpointId_(endpointId),
-        streamName_(resolveStreamName(environment, streamConfigId)),
+        streamIdentity_(resolveStreamIdentity(environment, streamConfigId)),
         endpointName_(endpointConfig(environment, endpointId).name),
         method_(endpointConfig(environment, endpointId).httpMethodType),
         path_(endpointConfig(environment, endpointId).path),
@@ -279,7 +280,9 @@ class UserverEndpoint final : public IUserverEndpoint {
       startedSpan = tracing::StartSpanInPlace(
           requestContext, tracer.get(), "http.input",
           {
-              tracing::Attribute::String("stream", streamName_),
+              tracing::Attribute::String("stream", streamIdentity_.name),
+            tracing::Attribute::String("pipeline", streamIdentity_.pipeline),
+            tracing::Attribute::String("component", streamIdentity_.component),
               tracing::Attribute::String("endpoint", endpointName_),
               tracing::Attribute::String(
                   "method", method_ == api::HTTPMethodType::kGET
@@ -514,13 +517,14 @@ class UserverEndpoint final : public IUserverEndpoint {
     return *httpConnector;
   }
 
-  static std::string resolveStreamName(
+  static StreamTraceIdentity resolveStreamIdentity(
       const IServiceEnvironment& environment, int streamConfigId) {
     const auto runtimeConfig = environment.getRuntimeConfigSnapshot();
     const auto stream = runtimeConfig && streamConfigId != 0
                             ? runtimeConfig->GetStreamConfigByID(streamConfigId)
                             : std::nullopt;
-    return stream ? stream->GetName() : std::string{};
+    return stream ? StreamTraceIdentity{stream->GetName(), stream->GetPipeline(), stream->GetComponent()}
+                  : StreamTraceIdentity{};
   }
 
   void callEndRequest(MessageContext context, const std::exception_ptr& error,
@@ -536,7 +540,7 @@ class UserverEndpoint final : public IUserverEndpoint {
 
   IServiceEnvironment& environment_;
   int endpointId_;
-  std::string streamName_;
+  StreamTraceIdentity streamIdentity_;
   std::string endpointName_;
   api::HTTPMethodType method_;
   std::string path_;
