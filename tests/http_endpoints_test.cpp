@@ -711,6 +711,12 @@ UTEST(HttpConnectors, OwnEndpointsAndResolveConfigThroughEnvironment) {
   sink->addEndpoint(sinkEndpoint);
   EXPECT_EQ(sink->endpoint(1), sinkEndpoint);
   EXPECT_THROW(sink->addEndpoint(sinkEndpoint), std::invalid_argument);
+  auto secondSinkEndpoint =
+      std::make_shared<servicelib::datasink::http::UserverEndpoint<
+          std::string, std::string, SinkHandler>>(
+          stream, client, SinkHandler{&endCalls, &hadError});
+  EXPECT_NO_THROW(sink->addEndpoint(secondSinkEndpoint));
+  EXPECT_EQ(sink->endpoint(1), sinkEndpoint);
   sink->start(servicelib::Context{});
   sink->stop(servicelib::Context{});
 }

@@ -13,6 +13,7 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include <userver/engine/deadline.hpp>
 #include <userver/ugrpc/client/call_options.hpp>
@@ -114,19 +115,23 @@ class UserverDataSink final {
         endpointConfig->GetIdDataConnector() != connectorId_) {
       throw std::invalid_argument("gRPC endpoint belongs to another connector");
     }
-    if (!endpoints_.emplace(endpoint->id(), std::move(endpoint)).second) {
-      throw std::invalid_argument("duplicate gRPC endpoint id");
+    for (const auto& existing : endpoints_) {
+      if (existing == endpoint) {
+        throw std::invalid_argument("duplicate data sink endpoint consumer");
+      }
     }
+    endpointsById_.try_emplace(endpoint->id(), endpoint);
+    endpoints_.push_back(std::move(endpoint));
   }
   [[nodiscard]] std::shared_ptr<IEndpoint> endpoint(int id) const {
-    const auto it = endpoints_.find(id);
-    return it == endpoints_.end() ? nullptr : it->second;
+    const auto it = endpointsById_.find(id);
+    return it == endpointsById_.end() ? nullptr : it->second;
   }
   void start(Context context) {
-    for (const auto& [_, endpoint] : endpoints_) endpoint->start(context);
+    for (const auto& endpoint : endpoints_) endpoint->start(context);
   }
   void stop(Context context) {
-    for (const auto& [_, endpoint] : endpoints_) endpoint->stop(context);
+    for (const auto& endpoint : endpoints_) endpoint->stop(context);
   }
 
  private:
@@ -148,7 +153,8 @@ class UserverDataSink final {
 
   IServiceEnvironment& environment_;
   int connectorId_;
-  std::unordered_map<int, std::shared_ptr<IEndpoint>> endpoints_;
+  std::vector<std::shared_ptr<IEndpoint>> endpoints_;
+  std::unordered_map<int, std::shared_ptr<IEndpoint>> endpointsById_;
 };
 
 inline userver::ugrpc::client::CallOptions callOptions(
