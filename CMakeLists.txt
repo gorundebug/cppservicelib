@@ -117,6 +117,8 @@ if(SERVICELIB_BUILD_TESTS)
       tests/tracing_test.cpp)
   servicelib_add_test(servicelib_telemetry_test
       tests/telemetry_test.cpp)
+  target_compile_definitions(servicelib_telemetry_test PRIVATE
+      SERVICELIB_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 endif()
 
 if(SERVICELIB_BUILD_BENCHMARKS)
