@@ -189,3 +189,37 @@ BSD-3-Clause. See [LICENSE](LICENSE).
 | Website | [gorundebug.com](https://www.gorundebug.com) |
 | Email | [serlex777@gmail.com](mailto:serlex777@gmail.com) |
 | Telegram | [t.me/+31qMliw-DeI3M2M6](https://t.me/+31qMliw-DeI3M2M6) |
+## Service-local SubStream
+
+`servicelib::ISubStream<T, R>` exposes a callable graph inside one service.
+Generated typed getters such as `getLookupSubStream()` let custom makers
+inject only the handles their business functions need. Handles are bound after
+graph construction; do not invoke them in a maker or after the service is gone.
+Weak generated handles prevent ownership cycles through business functions.
+
+```cpp
+auto collector = std::make_shared<servicelib::SubStreamCollectorFunc<std::string>>(
+    [](servicelib::MessageContext caller, const std::string& result) {
+      // Store or process result for this invocation.
+      return true;  // false continues collecting
+    });
+lookup->consume(context, payload, collector);
+```
+
+`lookup` is an injected `ISubStream<T, std::string>` handle and `payload` has
+type `servicelib::Payload<T>`. The collector interface lives in
+`servicelib/runtime/common.hpp`. The userver runtime waits cooperatively; use
+its existing task context, deadlines and cancellation conventions.
+
+The entry's `valueType` is the argument type; its `source` points to the reachable
+result producer and determines R. One body consumer is required; use Split for
+branching. No endpoint, separate result/error operator or message ID is needed.
+Preserve the supplied context in downstream emissions. Concurrent and nested
+calls have isolated collectors; callbacks for one call are serialized and receive
+the caller context. Returning true drops late results, but does not forcibly stop
+running branches. Cancellation drains an active callback, which must cooperate.
+
+Runtime failures are reported through the runtime exception conventions;
+business failures remain result values or graph error branches. Shared Join
+keys and worker-pool semantics are unchanged. Avoid exhausting a pool while
+waiting for work that needs that pool. Temporal is not supported by C++/userver.

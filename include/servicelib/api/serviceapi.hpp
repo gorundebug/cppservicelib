@@ -29,6 +29,7 @@ enum class JoinStorageType {
 enum class TransformationType {
   kUndefined = 0,  // Undefined
   kInput = 1,  // Input
+  kSubStream = 18,  // SubStream
   kMap = 2,  // Map
   kFilter = 3,  // Filter
   kJoin = 4,  // Join

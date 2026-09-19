@@ -428,3 +428,5 @@ UTEST(Operators, CallerSemanticsDispatchPreserveContextPriorityAndStatistics) {
                 {4, "priority-default"}, {5, "priority-context"},
                 {6, "parallel"}}));
 }
+
+#include "substream_test.hpp"

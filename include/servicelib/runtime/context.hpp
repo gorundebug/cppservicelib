@@ -24,6 +24,26 @@
 
 namespace servicelib {
 
+namespace detail {
+struct ContextKeyIdentity final {};
+struct LocalContextValue {
+  virtual ~LocalContextValue() = default;
+  std::shared_ptr<const ContextKeyIdentity> key;
+  std::shared_ptr<const LocalContextValue> parent;
+};
+template <typename T>
+struct TypedLocalContextValue final : LocalContextValue {
+  std::shared_ptr<T> value;
+};
+}  // namespace detail
+
+template <typename T>
+class ContextKey final {
+  friend class MessageContext;
+  std::shared_ptr<const detail::ContextKeyIdentity> identity_ =
+      std::make_shared<const detail::ContextKeyIdentity>();
+};
+
 using Deadline = std::optional<std::chrono::steady_clock::time_point>;
 
 // Generic context state: cancellation + deadline only. Base for all context
@@ -165,6 +185,7 @@ class Context {
 // Message-specific state: adds streamId/priority/trace on top of the
 // generic cancellation+deadline facet.
 struct ContextState final : ContextStateBase {
+  std::shared_ptr<const detail::LocalContextValue> localValues;
   std::string streamId;
   int priority{};
   bool hasPriority{};
@@ -174,6 +195,28 @@ struct ContextState final : ContextStateBase {
 class MessageContext final : public Context {
  public:
   MessageContext() : Context(std::make_shared<ContextState>()) {}
+
+  template <typename T>
+  [[nodiscard]] std::shared_ptr<T> localValue(const ContextKey<T>& key) const {
+    for (auto binding = derived()->localValues; binding; binding = binding->parent) {
+      if (binding->key == key.identity_) {
+        return static_cast<const detail::TypedLocalContextValue<T>&>(*binding).value;
+      }
+    }
+    return {};
+  }
+
+  template <typename T>
+  [[nodiscard]] MessageContext withLocalValue(
+      const ContextKey<T>& key, std::shared_ptr<T> value) const {
+    auto state = cloneDerived();
+    auto binding = std::make_shared<detail::TypedLocalContextValue<T>>();
+    binding->key = key.identity_;
+    binding->parent = state->localValues;
+    binding->value = std::move(value);
+    state->localValues = std::move(binding);
+    return MessageContext(std::move(state));
+  }
 
   [[nodiscard]] std::string_view streamId() const noexcept {
     return derived()->streamId;

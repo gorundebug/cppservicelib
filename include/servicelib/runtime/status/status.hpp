@@ -64,6 +64,8 @@ inline std::string_view TransformationName(
   switch (type) {
     case api::TransformationType::kInput:
       return "INPUT";
+    case api::TransformationType::kSubStream:
+      return "SUBSTREAM";
     case api::TransformationType::kMap:
       return "MAP";
     case api::TransformationType::kFilter:
@@ -249,6 +251,8 @@ inline std::string_view IconPath(api::TransformationType type) noexcept {
   switch (type) {
     case api::TransformationType::kInput:
       return kDatabaseArrowRight;
+    case api::TransformationType::kSubStream:
+      return kArrowLeftRight;
     case api::TransformationType::kMap:
       return kArrowLeftRight;
     case api::TransformationType::kFilter:

@@ -53,6 +53,7 @@ constexpr userver::utils::TrivialBiMap kTransformationTypeMap = [](auto selector
   return selector()
       .Case("Undefined", TransformationType::kUndefined)
       .Case("Input", TransformationType::kInput)
+      .Case("SubStream", TransformationType::kSubStream)
       .Case("Map", TransformationType::kMap)
       .Case("Filter", TransformationType::kFilter)
       .Case("Join", TransformationType::kJoin)

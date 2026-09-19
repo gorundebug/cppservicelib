@@ -45,6 +45,27 @@ struct InputStreamConfig {
   }
 };
 
+struct SubStreamConfig {
+  int id{};
+  std::string name;
+  std::string pipeline;
+  std::string component;
+  int idService{};
+  int idSource{};
+  std::vector<int> idSources;
+  double xPos{};
+  double yPos{};
+  std::string valueType;
+  PropertiesMap properties;
+
+  servicelib::api::TransformationType GetType() const noexcept {
+    return servicelib::api::TransformationType::kSubStream;
+  }
+  const userver::formats::yaml::Value* GetProperty(const std::string& propName) const {
+    return detail::FindProperty(properties, propName);
+  }
+};
+
 struct MapStreamConfig {
   int id{};
   std::string name;
@@ -411,6 +432,7 @@ class StreamConfigRef {
  public:
   using Variant =
       std::variant<std::reference_wrapper<const InputStreamConfig>,
+                   std::reference_wrapper<const SubStreamConfig>,
                    std::reference_wrapper<const MapStreamConfig>,
                    std::reference_wrapper<const FilterStreamConfig>,
                    std::reference_wrapper<const JoinStreamConfig>,
@@ -439,6 +461,7 @@ class StreamConfigRef {
 
  public:
   StreamConfigRef(const InputStreamConfig& v) : value_(std::cref(v)) {}
+  StreamConfigRef(const SubStreamConfig& v) : value_(std::cref(v)) {}
   StreamConfigRef(const MapStreamConfig& v) : value_(std::cref(v)) {}
   StreamConfigRef(const FilterStreamConfig& v) : value_(std::cref(v)) {}
   StreamConfigRef(const JoinStreamConfig& v) : value_(std::cref(v)) {}
@@ -543,6 +566,25 @@ inline InputStreamConfig Parse(const userver::formats::yaml::Value& value,
       {"id", "name", "pipeline", "component", "idService", "idSource", "idSources", "xPos", "yPos",
        "valueType", "idEndpoint"},
       result.properties);
+  return result;
+}
+
+inline SubStreamConfig Parse(const userver::formats::yaml::Value& value,
+                            userver::formats::parse::To<SubStreamConfig>) {
+  SubStreamConfig result;
+  result.id = value["id"].As<int>(0);
+  result.name = value["name"].As<std::string>("");
+  result.pipeline = value["pipeline"].As<std::string>("");
+  result.component = value["component"].As<std::string>("");
+  result.idService = value["idService"].As<int>(0);
+  result.idSource = value["idSource"].As<int>(0);
+  result.idSources = value["idSources"].As<std::vector<int>>(std::vector<int>{});
+  result.xPos = value["xPos"].As<double>(0.0);
+  result.yPos = value["yPos"].As<double>(0.0);
+  result.valueType = value["valueType"].As<std::string>("");
+  detail::ParseRemainingProperties(
+      value, {"id", "name", "pipeline", "component", "idService", "idSource",
+              "idSources", "xPos", "yPos", "valueType"}, result.properties);
   return result;
 }
 
