@@ -20,13 +20,13 @@ class SubStreamCollector {
 template <typename R>
 class SubStreamCollectorFunc final : public SubStreamCollector<R> {
  public:
-  explicit SubStreamCollectorFunc(std::function<bool(MessageContext, const R&)> function)
-      : function_(std::move(function)) {}
+  using Function = std::function<bool(MessageContext, const R&)>;
+  explicit SubStreamCollectorFunc(Function function) : function_(std::move(function)) {}
   bool out(MessageContext context, const R& value) override {
     return function_(std::move(context), value);
   }
  private:
-  std::function<bool(MessageContext, const R&)> function_;
+  Function function_;
 };
 
 template <typename T, typename R>
