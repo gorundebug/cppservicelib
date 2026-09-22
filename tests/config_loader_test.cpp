@@ -10,6 +10,7 @@
  * [LICENSE](https://opensource.org/licenses/MIT) file for details.
  */
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -36,7 +37,7 @@ using namespace std::chrono_literals;
 // in a full topology. Go analog of the test fixture: none needed there,
 // since Go's config.NewRuntimeConfig has no equivalent "must parse from
 // YAML" step to isolate.
-class TestConfig final : public servicelib::config::IConfig {
+class TestConfig : public servicelib::config::IConfig {
  public:
   TestConfig() = default;
 
@@ -140,6 +141,30 @@ void ApplyConfig(const userver::formats::yaml::Value& value,
 
 void ApplyEnvironment(TestConfig&) {}
 
+// Large generated topologies must not be copied onto a coroutine's stack.
+class LargeConfig final : public TestConfig {
+ public:
+  LargeConfig() {
+    service.id = 1;
+    service.name = "large-service";
+    pool.name = "large-pool";
+    pool.executorsCount = 2;
+  }
+
+  std::array<char, 2 * 1024 * 1024> payload{};
+};
+
+LargeConfig MakeConfig(userver::formats::parse::To<LargeConfig>) {
+  return LargeConfig{};
+}
+
+void ApplyConfig(const userver::formats::yaml::Value& value,
+                 LargeConfig& result) {
+  ApplyConfig(value, static_cast<TestConfig&>(result));
+}
+
+void ApplyEnvironment(LargeConfig&) {}
+
 class ConfigLoaderFixture {
  public:
   ConfigLoaderFixture()
@@ -222,6 +247,47 @@ UTEST(ConfigLoader, LoadWithoutBaseUsesGeneratedConfig) {
   ASSERT_NE(pool, nullptr);
   EXPECT_EQ(pool->executorsCount, 2);
   EXPECT_EQ(pool->queueCapacity, 64);
+}
+
+UTEST(ConfigLoader, LargeConfigLoadsAndReloadsWithoutStackCopies) {
+  ConfigLoaderFixture fixture;
+  const auto basePath = fixture.WriteFile(
+      "large-base.yaml", "pool:\n  executorsCount: 4\n");
+  const auto overridePath = fixture.WriteFile(
+      "large-override.yaml", "pool:\n  executorsCount: 4\n");
+  servicelib::testlog::TestLog log;
+  servicelib::testmetrics::TestMetrics metrics;
+  std::shared_ptr<const LargeConfig> originalTyped;
+  std::shared_ptr<const servicelib::config::RuntimeConfig> originalRuntime;
+  std::shared_ptr<const servicelib::config::RuntimeConfig> reloadedRuntime;
+  std::atomic<int> reloads{0};
+
+  {
+    servicelib::config::ConfigLoader<LargeConfig> loader(
+        {.configPath = basePath, .overridePath = overridePath}, {},
+        log, metrics, "large-config-test");
+    originalRuntime = loader.Load();
+    originalTyped = loader.GetConfig();
+    ASSERT_EQ(originalRuntime->GetPoolByName("large-pool"),
+              &originalTyped->pool);
+    EXPECT_EQ(originalTyped->pool.executorsCount, 4);
+    EXPECT_EQ(originalTyped->payload.front(), 0);
+    EXPECT_EQ(originalTyped->payload.back(), 0);
+
+    loader.Start(20ms, [&reloads](auto) { reloads.fetch_add(1); });
+    fixture.RewriteFile(overridePath, "pool:\n  executorsCount: 9\n");
+    userver::engine::SleepFor(500ms);
+    loader.Stop();
+    ASSERT_GE(reloads.load(), 1);
+    reloadedRuntime = loader.GetRuntimeConfig();
+    ASSERT_NE(reloadedRuntime->GetPoolByName("large-pool"), nullptr);
+    EXPECT_EQ(reloadedRuntime->GetPoolByName("large-pool")->executorsCount, 9);
+  }
+
+  // Both snapshots must remain valid after reload and loader destruction.
+  EXPECT_EQ(originalRuntime->GetPoolByName("large-pool")->executorsCount, 4);
+  EXPECT_EQ(originalTyped->pool.executorsCount, 4);
+  EXPECT_EQ(reloadedRuntime->GetPoolByName("large-pool")->executorsCount, 9);
 }
 
 UTEST(ConfigLoader, LoadAppliesYamlOnTopOfGeneratedDefaults) {

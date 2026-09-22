@@ -29,7 +29,6 @@ enum class JoinStorageType {
 enum class TransformationType {
   kUndefined = 0,  // Undefined
   kInput = 1,  // Input
-  kSubStream = 18,  // SubStream
   kMap = 2,  // Map
   kFilter = 3,  // Filter
   kJoin = 4,  // Join
@@ -46,6 +45,7 @@ enum class TransformationType {
   kError = 15,  // Error
   kDelay = 16,  // Delay
   kWhen = 17,  // When
+  kSubStream = 18,  // SubStream
 };
 
 enum class JoinType {
@@ -60,6 +60,13 @@ enum class HTTPMethodType {
   kUndefined = 0,  // Undefined
   kGET = 1,  // GET
   kPOST = 2,  // POST
+  kPUT = 3,  // PUT
+  kPATCH = 4,  // PATCH
+  kDELETE = 5,  // DELETE
+  kHEAD = 6,  // HEAD
+  kOPTIONS = 7,  // OPTIONS
+  kTRACE = 8,  // TRACE
+  kCONNECT = 9,  // CONNECT
 };
 
 enum class GrpcMethodType {
@@ -206,10 +213,9 @@ enum class DataType {
   kUint64 = 18,  // uint64
   kAny = 19,  // any
   kError = 20,  // error
-  kScheduleTrigger = 21,  // scheduleTrigger
-  kArray = 22,  // array
-  kMap = 23,  // map
-  kStruct = 24,  // struct
-  kCustom = 25,  // custom
+  kArray = 21,  // array
+  kMap = 22,  // map
+  kStruct = 23,  // struct
+  kCustom = 24,  // custom
 };
 }  // namespace servicelib::api

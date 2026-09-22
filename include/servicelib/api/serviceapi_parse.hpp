@@ -53,7 +53,6 @@ constexpr userver::utils::TrivialBiMap kTransformationTypeMap = [](auto selector
   return selector()
       .Case("Undefined", TransformationType::kUndefined)
       .Case("Input", TransformationType::kInput)
-      .Case("SubStream", TransformationType::kSubStream)
       .Case("Map", TransformationType::kMap)
       .Case("Filter", TransformationType::kFilter)
       .Case("Join", TransformationType::kJoin)
@@ -69,7 +68,8 @@ constexpr userver::utils::TrivialBiMap kTransformationTypeMap = [](auto selector
       .Case("CycleLink", TransformationType::kCycleLink)
       .Case("Error", TransformationType::kError)
       .Case("Delay", TransformationType::kDelay)
-      .Case("When", TransformationType::kWhen);
+      .Case("When", TransformationType::kWhen)
+      .Case("SubStream", TransformationType::kSubStream);
 };
 
 inline TransformationType Parse(const userver::formats::yaml::Value& value,
@@ -95,7 +95,14 @@ constexpr userver::utils::TrivialBiMap kHTTPMethodTypeMap = [](auto selector) {
   return selector()
       .Case("", HTTPMethodType::kUndefined)
       .Case("GET", HTTPMethodType::kGET)
-      .Case("POST", HTTPMethodType::kPOST);
+      .Case("POST", HTTPMethodType::kPOST)
+      .Case("PUT", HTTPMethodType::kPUT)
+      .Case("PATCH", HTTPMethodType::kPATCH)
+      .Case("DELETE", HTTPMethodType::kDELETE)
+      .Case("HEAD", HTTPMethodType::kHEAD)
+      .Case("OPTIONS", HTTPMethodType::kOPTIONS)
+      .Case("TRACE", HTTPMethodType::kTRACE)
+      .Case("CONNECT", HTTPMethodType::kCONNECT);
 };
 
 inline HTTPMethodType Parse(const userver::formats::yaml::Value& value,
@@ -332,7 +339,6 @@ constexpr userver::utils::TrivialBiMap kDataTypeMap = [](auto selector) {
       .Case("uint64", DataType::kUint64)
       .Case("any", DataType::kAny)
       .Case("error", DataType::kError)
-      .Case("schedule trigger", DataType::kScheduleTrigger)
       .Case("array", DataType::kArray)
       .Case("map", DataType::kMap)
       .Case("struct", DataType::kStruct)

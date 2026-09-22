@@ -198,7 +198,7 @@ class ConfigLoader final {
   std::shared_ptr<const ConcreteConfig> GetConfig() const {
     const auto state = state_.Read();
     auto loaded = *state;
-    return std::shared_ptr<const ConcreteConfig>(loaded, &loaded->config);
+    return std::shared_ptr<const ConcreteConfig>(loaded, loaded->config.get());
   }
 
  private:
@@ -208,10 +208,10 @@ class ConfigLoader final {
   // order matters — config is fully constructed before runtimeConfig's
   // member-initializer runs.
   struct LoadedConfig {
-    explicit LoadedConfig(ConcreteConfig cfg)
-        : config(std::move(cfg)), runtimeConfig(config) {}
+    explicit LoadedConfig(std::unique_ptr<ConcreteConfig> cfg)
+        : config(std::move(cfg)), runtimeConfig(*config) {}
 
-    ConcreteConfig config;
+    std::unique_ptr<ConcreteConfig> config;
     RuntimeConfig runtimeConfig;
   };
 
@@ -235,18 +235,22 @@ class ConfigLoader final {
     return wrapped.As<userver::formats::yaml::Value>();
   }
 
-  ConcreteConfig LoadOnce() const {
-    auto config = ConfigAdapter::Make();
+  std::unique_ptr<ConcreteConfig> LoadOnce() const {
+    // Construct the factory result directly in heap storage. Passing it to
+    // make_unique would materialize a potentially huge config on the limited
+    // coroutine stack before moving it into the allocation.
+    auto config = std::unique_ptr<ConcreteConfig>(
+        new ConcreteConfig(ConfigAdapter::Make()));
     if (paths_.configPath.empty()) {
-      ConfigAdapter::Finalize(config);
+      ConfigAdapter::Finalize(*config);
       return config;
     }
     auto flattened = ReadAndFlatten(paths_.configPath);
     if (paths_.overridePath) {
       flattened = DeepMerge(flattened, ReadAndFlatten(*paths_.overridePath));
     }
-    ConfigAdapter::Apply(flattened, config);
-    ConfigAdapter::Finalize(config);
+    ConfigAdapter::Apply(flattened, *config);
+    ConfigAdapter::Finalize(*config);
     return config;
   }
 
