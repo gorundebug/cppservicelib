@@ -251,8 +251,6 @@ inline std::string_view IconPath(api::TransformationType type) noexcept {
   switch (type) {
     case api::TransformationType::kInput:
       return kDatabaseArrowRight;
-    case api::TransformationType::kSubStream:
-      return kArrowLeftRight;
     case api::TransformationType::kMap:
       return kArrowLeftRight;
     case api::TransformationType::kFilter:
@@ -261,6 +259,7 @@ inline std::string_view IconPath(api::TransformationType type) noexcept {
     case api::TransformationType::kMultiJoin:
       return kCallMerge;
     case api::TransformationType::kProcess:
+    case api::TransformationType::kSubStream:
       return kFunction;
     case api::TransformationType::kFlatMap:
     case api::TransformationType::kFlatMapIterable:

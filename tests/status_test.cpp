@@ -69,3 +69,10 @@ UTEST(Status, KeepsDistinctConfigNodesThatShareAnExecutionTopologyId) {
   EXPECT_EQ(topology.edges.front().from.configId, 73);
   EXPECT_EQ(topology.edges.front().to.configId, 75);
 }
+
+UTEST(Status, UsesProcessIconForSubStream) {
+  EXPECT_EQ(servicelib::status::IconPath(
+                servicelib::api::TransformationType::kSubStream),
+            servicelib::status::IconPath(
+                servicelib::api::TransformationType::kProcess));
+}
