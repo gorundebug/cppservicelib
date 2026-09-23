@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <optional>
 #include <shared_mutex>
 #include <type_traits>
 
@@ -100,32 +101,36 @@ class BidirectionalStreamingEndpoint final : public Endpoint<T, R, Handler, E> {
         const auto error = std::current_exception();
         this->traceError(detachedTrace.span.get(), error,
                          "begin_request.error");
-        tracing::SpanEnd(detachedTrace.span.get());
+        if (detachedTrace.span) tracing::SpanEnd(detachedTrace.span.get());
         this->metrics_.beginRequestFailed(tracing::ExceptionMessage(error));
         cell->error = error;
         cell->markReady();
         dropReservation(streamId, cell);
         return;
       }
-      tracing::SpanEvent(detachedTrace.span.get(), "begin_request");
+      if (auto* traceSpan = detachedTrace.span.get()) traceSpan->addEvent("begin_request");
       context = std::move(begin->context);
       const auto requestContext = this->newRequestStreamId(context);
       const auto startedAt = this->metrics_.requestStart();
       try {
-        telemetry::userver_adapter::SamplingScope samplingScope{
-            this->tracingEnabled(), tracing::SamplingEnabled(requestContext),
-            requestContext.trace().traceState};
+        const bool tracingEnabled = this->tracingEnabled();
+        std::optional<telemetry::userver_adapter::SamplingScope> samplingScope;
+        if (tracingEnabled) {
+          samplingScope.emplace(true, tracing::SamplingEnabled(requestContext),
+                                requestContext.trace().traceState);
+        }
         session = std::make_shared<Session>(
             context, std::move(begin->state),
-            std::invoke(client_, callOptions(requestContext)), startedAt,
+            std::invoke(client_, callOptions(requestContext, tracingEnabled)),
+            startedAt,
             detachedTrace.span);
-        tracing::SpanEvent(session->span.get(), "grpc_call");
+        if (auto* traceSpan = session->span.get()) traceSpan->addEvent("grpc_call");
       } catch (...) {
         const auto error = std::current_exception();
         this->traceError(detachedTrace.span.get(), error, "grpc_call.error");
         this->callEnd(context, error, begin->state);
         this->metrics_.requestEnd(startedAt, error);
-        tracing::SpanEnd(detachedTrace.span.get());
+        if (detachedTrace.span) tracing::SpanEnd(detachedTrace.span.get());
         cell->error = error;
         cell->markReady();
         dropReservation(streamId, cell);
@@ -159,18 +164,18 @@ class BidirectionalStreamingEndpoint final : public Endpoint<T, R, Handler, E> {
       bool expected = false;
       if (session->done.compare_exchange_strong(expected, true,
                                                 std::memory_order_acq_rel)) {
-        tracing::SpanEvent(session->span.get(), "done_called");
+        if (auto* traceSpan = session->span.get()) traceSpan->addEvent("done_called");
         if (!session->rpc.WritesDone()) {
           throw std::runtime_error("gRPC WritesDone failed");
         }
-        tracing::SpanEvent(session->span.get(), "done_received");
+        if (auto* traceSpan = session->span.get()) traceSpan->addEvent("done_received");
       }
     }};
     try {
       this->handler_.consumeMessage(session->context, this->streamContext_,
                                     session->state, payload.get(), sender,
                                     result);
-      tracing::SpanEvent(session->span.get(), "consume_message");
+      if (auto* traceSpan = session->span.get()) traceSpan->addEvent("consume_message");
     } catch (...) {
       this->traceError(session->span.get(), std::current_exception(),
                        "consume_message.error");
@@ -211,8 +216,8 @@ class BidirectionalStreamingEndpoint final : public Endpoint<T, R, Handler, E> {
         break;
       }
       if (!received) {
-        tracing::SpanEvent(
-            session->span.get(), "eof",
+        if (auto* traceSpan = 
+            session->span.get()) traceSpan->addEvent("eof",
             {tracing::Attribute::Int64("messages_received", messageCount)});
         break;
       }

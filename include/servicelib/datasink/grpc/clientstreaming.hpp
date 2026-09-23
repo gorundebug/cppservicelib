@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <optional>
 #include <shared_mutex>
 #include <type_traits>
 
@@ -103,32 +104,36 @@ class ClientStreamingEndpoint final : public Endpoint<T, R, Handler, E> {
         const auto error = std::current_exception();
         this->traceError(detachedTrace.span.get(), error,
                          "begin_request.error");
-        tracing::SpanEnd(detachedTrace.span.get());
+        if (detachedTrace.span) tracing::SpanEnd(detachedTrace.span.get());
         this->metrics_.beginRequestFailed(tracing::ExceptionMessage(error));
         cell->error = error;
         cell->markReady();
         dropReservation(streamId, cell);
         return;
       }
-      tracing::SpanEvent(detachedTrace.span.get(), "begin_request");
+      if (auto* traceSpan = detachedTrace.span.get()) traceSpan->addEvent("begin_request");
       context = std::move(begin->context);
       const auto requestContext = this->newRequestStreamId(context);
       const auto startedAt = this->metrics_.requestStart();
       try {
-        telemetry::userver_adapter::SamplingScope samplingScope{
-            this->tracingEnabled(), tracing::SamplingEnabled(requestContext),
-            requestContext.trace().traceState};
+        const bool tracingEnabled = this->tracingEnabled();
+        std::optional<telemetry::userver_adapter::SamplingScope> samplingScope;
+        if (tracingEnabled) {
+          samplingScope.emplace(true, tracing::SamplingEnabled(requestContext),
+                                requestContext.trace().traceState);
+        }
         session = std::make_shared<Session>(
             context, std::move(begin->state),
-            std::invoke(client_, callOptions(requestContext)), startedAt,
+            std::invoke(client_, callOptions(requestContext, tracingEnabled)),
+            startedAt,
             detachedTrace.span);
-        tracing::SpanEvent(session->span.get(), "grpc_call");
+        if (auto* traceSpan = session->span.get()) traceSpan->addEvent("grpc_call");
       } catch (...) {
         const auto error = std::current_exception();
         this->traceError(detachedTrace.span.get(), error, "grpc_call.error");
         this->callEnd(context, error, begin->state);
         this->metrics_.requestEnd(startedAt, error);
-        tracing::SpanEnd(detachedTrace.span.get());
+        if (detachedTrace.span) tracing::SpanEnd(detachedTrace.span.get());
         cell->error = error;
         cell->markReady();
         dropReservation(streamId, cell);
@@ -162,7 +167,7 @@ class ClientStreamingEndpoint final : public Endpoint<T, R, Handler, E> {
       bool expected = false;
       if (session->doneSent.compare_exchange_strong(
               expected, true, std::memory_order_acq_rel)) {
-        tracing::SpanEvent(session->span.get(), "done_called");
+        if (auto* traceSpan = session->span.get()) traceSpan->addEvent("done_called");
         session->done.Send();
       }
     }};
@@ -170,7 +175,7 @@ class ClientStreamingEndpoint final : public Endpoint<T, R, Handler, E> {
       this->handler_.consumeMessage(session->context, this->streamContext_,
                                     session->state, payload.get(), sender,
                                     result);
-      tracing::SpanEvent(session->span.get(), "consume_message");
+      if (auto* traceSpan = session->span.get()) traceSpan->addEvent("consume_message");
     } catch (...) {
       this->traceError(session->span.get(), std::current_exception(),
                        "consume_message.error");
@@ -200,13 +205,13 @@ class ClientStreamingEndpoint final : public Endpoint<T, R, Handler, E> {
         session->lifetimeMutex, std::defer_lock);
     try {
       session->done.Wait();
-      tracing::SpanEvent(session->span.get(), "done_received");
+      if (auto* traceSpan = session->span.get()) traceSpan->addEvent("done_received");
       lifetimeLock.lock();
       static_cast<void>(pending_.pop(streamId));
       std::optional<Res> response;
       try {
         response.emplace(session->rpc.Finish());
-        tracing::SpanEvent(session->span.get(), "close_and_recv");
+        if (auto* traceSpan = session->span.get()) traceSpan->addEvent("close_and_recv");
       } catch (...) {
         this->traceError(session->span.get(), std::current_exception(),
                          "close_and_recv.error");
@@ -215,7 +220,7 @@ class ClientStreamingEndpoint final : public Endpoint<T, R, Handler, E> {
       try {
         this->handler_.handleResponse(session->context, this->streamContext_,
                                       session->state, *response);
-        tracing::SpanEvent(session->span.get(), "handle_response");
+        if (auto* traceSpan = session->span.get()) traceSpan->addEvent("handle_response");
       } catch (...) {
         this->traceError(session->span.get(), std::current_exception(),
                          "handle_response.error");

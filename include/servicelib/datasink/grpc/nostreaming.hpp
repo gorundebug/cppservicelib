@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <optional>
 
 #include <servicelib/datasink/grpc/common.hpp>
 
@@ -28,7 +29,7 @@ class NoStreamingEndpoint final : public Endpoint<T, R, Handler, E> {
       this->metrics_.beginRequestFailed(tracing::ExceptionMessage(error));
       return;
     }
-    tracing::SpanEvent(startedSpan.span(), "begin_request");
+    if (auto* traceSpan = startedSpan.span()) traceSpan->addEvent("begin_request");
     context = std::move(begin->context);
     const auto requestContext = this->newRequestStreamId(context);
     const auto startedAt = this->metrics_.requestStart();
@@ -41,7 +42,7 @@ class NoStreamingEndpoint final : public Endpoint<T, R, Handler, E> {
       if (!request) {
         throw std::runtime_error("gRPC sink handler sent no request");
       }
-      tracing::SpanEvent(startedSpan.span(), "consume_message");
+      if (auto* traceSpan = startedSpan.span()) traceSpan->addEvent("consume_message");
     } catch (...) {
       error = std::current_exception();
       this->traceError(startedSpan.span(), error, "consume_message.error");
@@ -49,12 +50,15 @@ class NoStreamingEndpoint final : public Endpoint<T, R, Handler, E> {
     std::optional<Res> response;
     if (!error) {
       try {
-        telemetry::userver_adapter::SamplingScope samplingScope{
-            this->tracingEnabled(), tracing::SamplingEnabled(requestContext),
-            requestContext.trace().traceState};
+        const bool tracingEnabled = this->tracingEnabled();
+        std::optional<telemetry::userver_adapter::SamplingScope> samplingScope;
+        if (tracingEnabled) {
+          samplingScope.emplace(true, tracing::SamplingEnabled(requestContext),
+                                requestContext.trace().traceState);
+        }
         response.emplace(std::invoke(client_, std::move(*request),
-                                     callOptions(requestContext)));
-        tracing::SpanEvent(startedSpan.span(), "grpc_call");
+                                     callOptions(requestContext, tracingEnabled)));
+        if (auto* traceSpan = startedSpan.span()) traceSpan->addEvent("grpc_call");
       } catch (...) {
         error = std::current_exception();
         this->traceError(startedSpan.span(), error, "grpc_call.error");
@@ -64,7 +68,7 @@ class NoStreamingEndpoint final : public Endpoint<T, R, Handler, E> {
       try {
         this->handler_.handleResponse(context, this->streamContext_,
                                       begin->state, *response);
-        tracing::SpanEvent(startedSpan.span(), "handle_response");
+        if (auto* traceSpan = startedSpan.span()) traceSpan->addEvent("handle_response");
       } catch (...) {
         error = std::current_exception();
         this->traceError(startedSpan.span(), error, "handle_response.error");

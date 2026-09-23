@@ -89,6 +89,7 @@ class DelayPoolImpl final : public IDelayPool {
       const auto serviceSnapshot = env.getServiceConfigSnapshot();
       const auto* service = serviceSnapshot.get();
       metricsEnabled = env.getMetrics().enabled();
+      tracingEnabled = env.getTracing() != nullptr;
       auto scope = env.getMetrics().scope(
           "delay_pool", metrics::Labels{{"service", service ? service->name
                                                             : std::string()}});
@@ -116,6 +117,7 @@ class DelayPoolImpl final : public IDelayPool {
     PoolState poolState = PoolState::kCreated;
     std::int64_t pending = 0;
     bool metricsEnabled{};
+    bool tracingEnabled{};
 
     std::unique_ptr<metrics::Int64Gauge> gaugeWaitQueueLength;
     std::unique_ptr<metrics::Int64Counter> tasksTotal;
@@ -237,7 +239,7 @@ class DelayPoolImpl final : public IDelayPool {
     task->fn = std::move(fn);
     task->contextDeadlineWins = contextDeadlineWins;
     using SpanCall = userver::utils::impl::SpanWrapCall;
-    if (task->ctx.samplingEnabled() && state->env.getTracing()) {
+    if (state->tracingEnabled && task->ctx.samplingEnabled()) {
       task->tracedCall = std::make_unique<SpanCall>(
           runAt <= now ? "delay-pool-task" : "delay-pool-timer",
           userver::utils::impl::SourceLocation::Current(),

@@ -107,7 +107,7 @@ class ResultContext final {
   }
 
   void done() noexcept {
-    tracing::SpanEvent(result_->span.get(), "done_called");
+    if (auto* traceSpan = result_->span.get()) traceSpan->addEvent("done_called");
     bool expected = false;
     if (result_->doneSent.compare_exchange_strong(expected, true,
                                                   std::memory_order_acq_rel)) {
@@ -163,6 +163,7 @@ class UserverEndpoint final : public IUserverEndpoint {
                   bool hasResult, ErrorOutput errorOutput = {})
       : environment_(environment),
         endpointId_(endpointId),
+        tracingEngineAvailable_(environment.getTracing() != nullptr),
         streamIdentity_(resolveStreamIdentity(environment, streamConfigId)),
         endpointName_(endpointConfig(environment, endpointId).name),
         method_(endpointConfig(environment, endpointId).httpMethodType),
@@ -208,11 +209,13 @@ class UserverEndpoint final : public IUserverEndpoint {
 
   std::string handle(
       const userver::server::http::HttpRequest& request) override {
-    auto* const tracingEngine = environment_.getTracing();
+    auto* const tracingEngine =
+        tracingEngineAvailable_ ? environment_.getTracing() : nullptr;
     const bool samplingRequested =
-        endpointConfig().tracingEnabled ||
-        !request.GetHeader("X-Trace").empty() ||
-        tracing::SampledTraceParent(request.GetHeader("traceparent"));
+        tracingEngine &&
+        (endpointConfig().tracingEnabled ||
+         !request.GetHeader("X-Trace").empty() ||
+         tracing::SampledTraceParent(request.GetHeader("traceparent")));
     // userver treats a root span with no incoming trace flags as sampled.
     // Override that default before any downstream client can propagate it.
     if (tracingEngine) {
@@ -299,15 +302,15 @@ class UserverEndpoint final : public IUserverEndpoint {
     } catch (...) {
       const auto error = std::current_exception();
       const auto message = tracing::ExceptionMessage(error);
-      tracing::SpanError(startedSpan.span(), message);
-      tracing::SpanEvent(startedSpan.span(), "begin_request.error",
+      if (auto* traceSpan = startedSpan.span()) tracing::SpanError(traceSpan, message);
+      if (auto* traceSpan = startedSpan.span()) traceSpan->addEvent("begin_request.error",
                          {tracing::Attribute::String("error", message)});
       // As in Go/Python, BeginRequest owns its error response and is the only
       // failure path that does not call EndRequest.
       metrics_.beginRequestFailed(message);
       return std::move(data.responseBody);
     }
-    tracing::SpanEvent(startedSpan.span(), "begin_request");
+    if (auto* traceSpan = startedSpan.span()) traceSpan->addEvent("begin_request");
     auto begin = std::move(*beginResult);
 
     auto context = std::move(begin.context);
@@ -340,13 +343,16 @@ class UserverEndpoint final : public IUserverEndpoint {
                                 HandlerResultContext{result});
       } catch (...) {
         const auto consumeError = std::current_exception();
-        const auto message = tracing::ExceptionMessage(consumeError);
-        tracing::SpanError(startedSpan.span(), message);
-        tracing::SpanEvent(startedSpan.span(), "consume_message.error",
-                           {tracing::Attribute::String("error", message)});
+        if (auto* traceSpan = startedSpan.span()) {
+          const auto message = tracing::ExceptionMessage(consumeError);
+          tracing::SpanError(traceSpan, message);
+          traceSpan->addEvent(
+              "consume_message.error",
+              {tracing::Attribute::String("error", message)});
+        }
         std::rethrow_exception(consumeError);
       }
-      tracing::SpanEvent(startedSpan.span(), "consume_message");
+      if (auto* traceSpan = startedSpan.span()) traceSpan->addEvent("consume_message");
       if (hasResult_) {
         try {
           result->done.Wait();
@@ -362,8 +368,9 @@ class UserverEndpoint final : public IUserverEndpoint {
       }
       error = std::current_exception();
       if (!resultWaitFailed) {
-        tracing::SpanError(startedSpan.span(),
-                           tracing::ExceptionMessage(error));
+        if (auto* traceSpan = startedSpan.span()) {
+          tracing::SpanError(traceSpan, tracing::ExceptionMessage(error));
+        }
       }
     }
 
@@ -392,16 +399,19 @@ class UserverEndpoint final : public IUserverEndpoint {
         error = nullptr;
         doneReceived = true;
       } else if (resultWaitFailed) {
-        const auto message = tracing::ExceptionMessage(error);
-        tracing::SpanError(startedSpan.span(), message);
-        tracing::SpanEvent(startedSpan.span(), "context_cancelled",
-                           {tracing::Attribute::String("error", message)});
+        if (auto* traceSpan = startedSpan.span()) {
+          const auto message = tracing::ExceptionMessage(error);
+          tracing::SpanError(traceSpan, message);
+          traceSpan->addEvent(
+              "context_cancelled",
+              {tracing::Attribute::String("error", message)});
+        }
       }
       if (!result->done.IsReady() && !error) {
         error = std::make_exception_ptr(HttpRequestCancelledError{});
       }
       if (doneReceived) {
-        tracing::SpanEvent(startedSpan.span(), "done_received");
+        if (auto* traceSpan = startedSpan.span()) traceSpan->addEvent("done_received");
       }
       callEndRequest(context, error, *result, data);
     } else {
@@ -434,7 +444,7 @@ class UserverEndpoint final : public IUserverEndpoint {
     const auto current = pending_.get(streamId);
     if (!current || *current != result) {
       metrics_.lateResult(streamId);
-      tracing::SpanEvent(result->span.get(), "late_result");
+      if (auto* traceSpan = result->span.get()) traceSpan->addEvent("late_result");
       return;
     }
 
@@ -448,7 +458,7 @@ class UserverEndpoint final : public IUserverEndpoint {
     }
     if (!callback || !*callback) {
       metrics_.unknownMessageId(streamId, messageId);
-      tracing::SpanEvent(result->span.get(), "unknown_message_id",
+      if (auto* traceSpan = result->span.get()) traceSpan->addEvent("unknown_message_id",
                          {tracing::Attribute::String("message_id", messageId)});
       return;
     }
@@ -462,13 +472,13 @@ class UserverEndpoint final : public IUserverEndpoint {
       }
       if (duplicate) {
         metrics_.duplicateMessageId(streamId, messageId);
-        tracing::SpanEvent(
-            result->span.get(), "duplicate_message_id",
+        if (auto* traceSpan = 
+            result->span.get()) traceSpan->addEvent("duplicate_message_id",
             {tracing::Attribute::String("message_id", messageId)});
       }
     }
     if (result->span) {
-      tracing::SpanEvent(result->span.get(), "result_consumed",
+      if (auto* traceSpan = result->span.get()) traceSpan->addEvent("result_consumed",
                          {tracing::Attribute::String("message_id", messageId)});
     }
   }
@@ -540,6 +550,7 @@ class UserverEndpoint final : public IUserverEndpoint {
 
   IServiceEnvironment& environment_;
   int endpointId_;
+  bool tracingEngineAvailable_;
   StreamTraceIdentity streamIdentity_;
   std::string endpointName_;
   api::HTTPMethodType method_;

@@ -10,6 +10,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -76,8 +77,9 @@ class ConsumerClient {
 class UserverConsumerClient final : public ConsumerClient {
  public:
   UserverConsumerClient(userver::kafka::ConsumerScope& consumer,
-                        std::string topic)
-      : consumer_(consumer), topic_(std::move(topic)) {}
+                        std::string topic, bool tracingEnabled = true)
+      : consumer_(consumer), topic_(std::move(topic)),
+        tracingEnabled_(tracingEnabled) {}
 
   void start(Callback callback) override {
     const auto& topics = consumer_.GetTopics();
@@ -101,15 +103,24 @@ class UserverConsumerClient final : public ConsumerClient {
             static_cast<std::uint32_t>(message.GetPartition());
         servicelib::detail::KafkaHeaders headers;
         for (const auto header : message.GetHeaders()) {
-          std::string name{header.name.data(), header.name.size()};
-          std::transform(name.begin(), name.end(), name.begin(),
-                         [](unsigned char value) {
-                           return static_cast<char>(std::tolower(value));
-                         });
-          if (name == "x-stream-id" || name == "x-trace" ||
-              name == "traceparent" || name == "tracestate" ||
-              name == "baggage") {
-            headers[std::move(name)] = std::string{header.value};
+          const std::string_view name{header.name.data(), header.name.size()};
+          const auto matches = [name](std::string_view expected) {
+            return name.size() == expected.size() &&
+                   std::equal(name.begin(), name.end(), expected.begin(),
+                              [](unsigned char actual, char canonical) {
+                                return std::tolower(actual) == canonical;
+                              });
+          };
+          if (matches("x-stream-id")) {
+            headers["x-stream-id"] = std::string{header.value};
+          } else if (tracingEnabled_) {
+            for (const auto traceHeader : {"x-trace", "traceparent",
+                                           "tracestate", "baggage"}) {
+              if (matches(traceHeader)) {
+                headers[traceHeader] = std::string{header.value};
+                break;
+              }
+            }
           }
         }
         partitions[partition].push_back({
@@ -159,6 +170,7 @@ class UserverConsumerClient final : public ConsumerClient {
  private:
   userver::kafka::ConsumerScope& consumer_;
   std::string topic_;
+  bool tracingEnabled_;
 };
 
 namespace detail {
@@ -166,12 +178,13 @@ namespace detail {
 class ProducerAdapter final {
  public:
   using Consumer = std::function<void(MessageContext, Payload<ConsumerMessage>)>;
-  explicit ProducerAdapter(ConsumerClient& client) : client_(client) {}
+  ProducerAdapter(ConsumerClient& client, IServiceEnvironment& environment)
+      : client_(client), tracingEnabled_(environment.getTracing() != nullptr) {}
 
   void start(Context, Consumer consumer) {
-    client_.start([consumer = std::move(consumer)](ConsumerMessage message) {
-      auto context =
-          servicelib::detail::ContextFromKafkaHeaders(message.headers());
+    client_.start([tracingEnabled = tracingEnabled_, consumer = std::move(consumer)](ConsumerMessage message) {
+      auto context = servicelib::detail::ContextFromKafkaHeaders(
+          message.headers(), tracingEnabled);
       consumer(std::move(context),
                Payload<ConsumerMessage>::make(std::move(message)));
     });
@@ -180,6 +193,7 @@ class ProducerAdapter final {
 
  private:
   ConsumerClient& client_;
+  bool tracingEnabled_{};
 };
 
 template <typename Handler, typename T, typename R, typename E>
@@ -265,7 +279,7 @@ class Endpoint final {
   Endpoint(IServiceEnvironment& environment, int endpointId,
            int streamConfigId, ConsumerClient& consumer, Handler handler,
            Output output, bool hasResult, ErrorOutput errorOutput = {})
-      : producer_(consumer),
+      : producer_(consumer, environment),
         environment_(environment),
         endpointId_(endpointId),
         implementation_(
