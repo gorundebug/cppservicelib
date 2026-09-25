@@ -40,6 +40,7 @@
 #include <userver/engine/task/current_task.hpp>
 #include <userver/engine/task/local_variable.hpp>
 #include <userver/utils/assert.hpp>
+#include <userver/utils/fast_scope_guard.hpp>
 
 #include <servicelib/runtime/environment/environment.hpp>
 #include <servicelib/runtime/pool/pool.hpp>
@@ -569,41 +570,26 @@ class DelayPoolImpl final : public IDelayPool {
     const auto startedAt = state->metricsEnabled
                                ? std::chrono::steady_clock::now()
                                : std::chrono::steady_clock::time_point{};
-    try {
-      task->fn();
-    } catch (const std::exception& error) {
-      bestEffort([state, &error] {
-        state->env.getLogger().warn(
-            "delay pool task error",
-            {log::Field::Str("pool", "delay"), log::Field::Err(error)});
-      });
-    } catch (...) {
-      bestEffort([state] {
-        state->env.getLogger().warn("delay pool task error",
-                                    {log::Field::Str("pool", "delay"),
-                                     log::Field::Str("error", "<unknown>")});
-      });
-    }
-    task->fn = nullptr;
-
-    if (state->metricsEnabled) {
-      bestEffort([state] { state->tasksTotal->inc(); });
-      const double elapsed = std::chrono::duration<double>(
-                                 std::chrono::steady_clock::now() - startedAt)
-                                 .count();
-      bestEffort(
-          [state, elapsed] { state->executionDuration->observe(elapsed); });
-      if (expedited) {
-        bestEffort([state] { state->taskCancelledCounter->inc(); });
+    const userver::utils::FastScopeGuard retire([&]() noexcept {
+      engine::TaskCancellationBlocker blocker;
+      task->fn = nullptr;
+      if (state->metricsEnabled) {
+        bestEffort([state] { state->tasksTotal->inc(); });
+        const double elapsed = std::chrono::duration<double>(
+                                   std::chrono::steady_clock::now() - startedAt)
+                                   .count();
+        bestEffort(
+            [state, elapsed] { state->executionDuration->observe(elapsed); });
+        if (expedited) {
+          bestEffort([state] { state->taskCancelledCounter->inc(); });
+        }
       }
-    }
-
-    {
       std::unique_lock<engine::Mutex> lock(state->mu);
       --state->pending;
       publishPendingGaugeLocked(*state);
       state->cv.NotifyAll();
-    }
+    });
+    servicelib::detail::invokeAsyncCallback(task->fn);
   }
 
   inline static engine::TaskLocalVariable<const void*> currentExecutingPool_;

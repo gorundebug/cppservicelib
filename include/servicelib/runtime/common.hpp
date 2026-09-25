@@ -1,14 +1,46 @@
 #pragma once
 
+#include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <memory>
+#include <stdexcept>
 #include <string_view>
 #include <utility>
+
+#include <userver/engine/exception.hpp>
 
 #include <servicelib/runtime/context.hpp>
 #include <servicelib/runtime/payload.hpp>
 
 namespace servicelib {
+
+class OperationCancelledError : public std::runtime_error {
+ public:
+  using std::runtime_error::runtime_error;
+};
+
+namespace detail {
+
+// An exception escaping detached business work has no caller to receive it.
+// Ordinary business failures must use their typed result/error channel.
+// Do not catch (...): userver's private coroutine-unwind exception MUST reach
+// its task boundary. It cannot be swallowed or mistaken for a business panic.
+template <typename Function>
+void invokeAsyncCallback(Function&& function) {
+  try {
+    std::invoke(std::forward<Function>(function));
+  } catch (const OperationCancelledError&) {
+    // Expected cancellation is not a process failure.
+  } catch (const userver::engine::WaitInterruptedException&) {
+  } catch (const userver::engine::TaskCancelledException&) {
+  } catch (const std::exception& error) {
+    std::fprintf(stderr, "servicelib: unhandled callback exception: %s\n", error.what());
+    std::_Exit(2);
+  }
+}
+
+}  // namespace detail
 
 template <typename R>
 class SubStreamCollector {

@@ -10,7 +10,13 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
+#include <vector>
+
+#include <userver/engine/async.hpp>
+#include <userver/engine/task/cancel.hpp>
+#include <userver/engine/task/task_with_result.hpp>
 
 #include <servicelib/runtime/common.hpp>
 #include <servicelib/runtime/environment/log/log.hpp>
@@ -18,6 +24,47 @@
 #include <servicelib/runtime/payload.hpp>
 
 namespace servicelib {
+
+namespace detail {
+
+// A connector can have several sink consumers of one endpoint. Preserve their
+// reverse registration order while letting independent endpoint IDs stop in
+// parallel. Each task owns its handlers until their cleanup has finished.
+template <typename Endpoint>
+void stopSinkEndpoints(const std::vector<std::shared_ptr<Endpoint>>& endpoints,
+                       Context context) {
+  std::unordered_map<int, std::vector<std::shared_ptr<Endpoint>>> groups;
+  for (const auto& endpoint : endpoints) {
+    groups[endpoint->id()].push_back(endpoint);
+  }
+  userver::engine::TaskCancellationBlocker cancellationBlocker;
+  std::vector<userver::engine::TaskWithResult<std::exception_ptr>> tasks;
+  tasks.reserve(groups.size());
+  for (auto& [id, group] : groups) {
+    static_cast<void>(id);
+    tasks.push_back(userver::engine::CriticalAsyncNoTracing(
+        [group = std::move(group), context]() -> std::exception_ptr {
+          userver::engine::TaskCancellationBlocker blocker;
+          std::exception_ptr firstError;
+          for (auto it = group.rbegin(); it != group.rend(); ++it) {
+            try {
+              (*it)->stop(context);
+            } catch (...) {
+              if (!firstError) firstError = std::current_exception();
+            }
+          }
+          return firstError;
+        }));
+  }
+  std::exception_ptr firstError;
+  for (auto& task : tasks) {
+    auto error = task.Get();
+    if (!firstError) firstError = std::move(error);
+  }
+  if (firstError) std::rethrow_exception(firstError);
+}
+
+}  // namespace detail
 
 class IServiceEnvironment;
 

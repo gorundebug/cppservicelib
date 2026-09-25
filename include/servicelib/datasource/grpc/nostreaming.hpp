@@ -48,7 +48,7 @@ class NoStreamingEndpoint final : public Endpoint<Req, Res, T, R, Handler, E> {
       this->eof(request);
       if (this->hasResult()) {
         resultWaitFailed = true;
-        responseReady.Wait();
+        waitForResult(request->context, responseReady);
         resultWaitFailed = false;
       }
     } catch (...) {

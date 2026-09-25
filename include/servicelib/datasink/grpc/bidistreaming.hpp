@@ -9,6 +9,7 @@
 #include <userver/engine/condition_variable.hpp>
 #include <userver/engine/mutex.hpp>
 #include <userver/engine/shared_mutex.hpp>
+#include <userver/engine/task/cancel.hpp>
 
 #include <servicelib/datasink/grpc/common.hpp>
 #include <servicelib/runtime/store/rotatingmap.hpp>
@@ -37,6 +38,7 @@ class BidirectionalStreamingEndpoint final : public Endpoint<T, R, Handler, E> {
     DataSinkEndpointMetrics::Clock::time_point startedAt;
     std::shared_ptr<tracing::Span> span;
     std::atomic<bool> done{false};
+    std::atomic<bool> finalizing{false};
     userver::engine::SharedMutex lifetimeMutex;
   };
 
@@ -62,6 +64,9 @@ class BidirectionalStreamingEndpoint final : public Endpoint<T, R, Handler, E> {
     }
 
     void wait() {
+      // Match Go's readiness-channel wait: cancellation cannot expose a
+      // partially initialized session (or race with publication of its error).
+      userver::engine::TaskCancellationBlocker cancellationBlocker;
       std::unique_lock<pool::engine::Mutex> lock(mu);
       static_cast<void>(cv.Wait(lock, [this] { return ready; }));
     }
@@ -128,11 +133,13 @@ class BidirectionalStreamingEndpoint final : public Endpoint<T, R, Handler, E> {
       } catch (...) {
         const auto error = std::current_exception();
         this->traceError(detachedTrace.span.get(), error, "grpc_call.error");
+        // Publish failure before invoking user code: EndRequest may reenter
+        // Consume with this ID. Keep the reservation until cleanup finishes.
+        cell->error = error;
+        cell->markReady();
         this->callEnd(context, error, begin->state);
         this->metrics_.requestEnd(startedAt, error);
         if (detachedTrace.span) tracing::SpanEnd(detachedTrace.span.get());
-        cell->error = error;
-        cell->markReady();
         dropReservation(streamId, cell);
         return;
       }
@@ -140,7 +147,10 @@ class BidirectionalStreamingEndpoint final : public Endpoint<T, R, Handler, E> {
       cell->markReady();
       tasks_.CriticalAsyncDetach(
           "servicelib-grpc-bidi-read",
-          [this, streamId, session] { readResponses(streamId, session); });
+          [this, streamId, session] {
+            detail::StreamingTaskCancellation cancellation{session->context};
+            readResponses(streamId, session);
+          });
     } else {
       cell->wait();
       if (cell->error) {
@@ -151,9 +161,15 @@ class BidirectionalStreamingEndpoint final : public Endpoint<T, R, Handler, E> {
       session = cell->session;
     }
 
+    if (session->finalizing.load(std::memory_order_acquire)) {
+      this->metrics_.lateResult(streamId);
+      if (auto* span = session->span.get()) span->addEvent("late_message");
+      return;
+    }
     std::shared_lock lifetimeLock(session->lifetimeMutex);
     const auto current = pending_.get(streamId);
-    if (!current || *current != cell) {
+    if (session->finalizing.load(std::memory_order_acquire) ||
+        !current || *current != cell) {
       this->metrics_.lateResult(streamId);
       return;
     }
@@ -231,10 +247,12 @@ class BidirectionalStreamingEndpoint final : public Endpoint<T, R, Handler, E> {
         break;
       }
     }
+    userver::engine::TaskCancellationBlocker cancellationBlocker;
+    session->finalizing.store(true, std::memory_order_release);
     std::unique_lock lifetimeLock(session->lifetimeMutex);
-    static_cast<void>(pending_.pop(streamId));
     this->callEnd(session->context, error, session->state);
     this->metrics_.requestEnd(session->startedAt, error);
+    static_cast<void>(pending_.pop(streamId));
   }
 
   ClientFunction client_;

@@ -3,6 +3,7 @@
 #include <atomic>
 #include <stdexcept>
 #include <stop_token>
+#include <thread>
 
 #include <userver/engine/sleep.hpp>
 #include <userver/utils/async.hpp>
@@ -216,6 +217,8 @@ UTEST(SubStream, CollectorFailureReturnsToCaller) {
 }
 
 UTEST(SubStream, CancellationDrainsAnActiveCollector) {
+  for (const bool completed : {false, true}) {
+  SCOPED_TRACE(completed);
   userver::engine::SingleConsumerEvent entered;
   userver::engine::SingleConsumerEvent release;
   std::atomic<bool> returned{false};
@@ -223,13 +226,17 @@ UTEST(SubStream, CancellationDrainsAnActiveCollector) {
       servicelib::MessageContext{}, subStreamCollector([&](auto, int) {
         entered.Send();
         EXPECT_TRUE(release.WaitForEventFor(userver::utest::kMaxTestWaitTime));
-        return true;
+        return completed;
       }));
   auto delivery = userver::utils::Async("substream-delivery", [call] { call->deliver(1); });
   ASSERT_TRUE(entered.WaitForEventFor(userver::utest::kMaxTestWaitTime));
   call->cancel();
-  auto waiter = userver::utils::Async("substream-close", [call, &returned] {
-    EXPECT_THROW(call->wait({}), std::runtime_error);
+  auto waiter = userver::utils::Async("substream-close", [call, &returned, completed] {
+    if (completed) {
+      EXPECT_NO_THROW(call->wait({}));
+    } else {
+      EXPECT_THROW(call->wait({}), std::runtime_error);
+    }
     call->close();
     returned = true;
   });
@@ -239,6 +246,33 @@ UTEST(SubStream, CancellationDrainsAnActiveCollector) {
   delivery.Get();
   waiter.Get();
   EXPECT_TRUE(returned.load());
+  }
+}
+
+UTEST(SubStream, CollectorCompletionWinsItsOwnCancellation) {
+  for (const bool completed : {false, true}) {
+    SCOPED_TRACE(completed);
+    auto entry = subStreamForTest(completed ? 590 : 580, [](auto context, auto&, int value, auto&& out) {
+      out.out(context, value);
+    });
+    std::stop_source stop;
+    int called = 0;
+    auto consume = [&] {
+      entry->consume(servicelib::MessageContext{}.withStopToken(stop.get_token()),
+                     servicelib::Payload<int>::make(1),
+                     subStreamCollector([&](auto, int) {
+                       ++called;
+                       stop.request_stop();
+                       return completed;
+                     }));
+    };
+    if (completed) {
+      EXPECT_NO_THROW(consume());
+    } else {
+      EXPECT_THROW(consume(), std::runtime_error);
+    }
+    EXPECT_EQ(called, 1);
+  }
 }
 
 UTEST(SubStream, TaskCancellationReleasesCallbackAndDropsLateValues) {
@@ -258,4 +292,81 @@ UTEST(SubStream, TaskCancellationReleasesCallbackAndDropsLateValues) {
   EXPECT_ANY_THROW(task.Get());
   source->consume(savedContext, servicelib::Payload<int>::make(1));
   EXPECT_EQ(called.load(), 0);
+}
+
+UTEST_MT(SubStream, DeferredResultAndCollectorProgressOnOneWorker, 1) {
+  servicelib::MessageContext savedContext;
+  userver::engine::SingleConsumerEvent entered;
+  userver::engine::SingleConsumerEvent collectorEntered;
+  userver::engine::SingleConsumerEvent releaseCollector;
+  auto [entry, source] = subStreamForLateResultTest(610, savedContext, entered);
+  const auto worker = std::this_thread::get_id();
+  const auto context = servicelib::MessageContext{}
+                           .withStreamId("one-worker-call")
+                           .withDeadline(std::chrono::steady_clock::now() +
+                                         std::chrono::seconds(5));
+  std::atomic<bool> returned{false};
+  int received = -1;
+  auto call = userver::utils::Async("deferred-substream-call", [&] {
+    EXPECT_EQ(std::this_thread::get_id(), worker);
+    entry->consume(context, servicelib::Payload<int>::make(7),
+                   subStreamCollector([&](auto resultContext, int value) {
+                     EXPECT_EQ(std::this_thread::get_id(), worker);
+                     EXPECT_EQ(resultContext.streamId(), "one-worker-call");
+                     collectorEntered.Send();
+                     EXPECT_TRUE(releaseCollector.WaitForEventFor(
+                         userver::utest::kMaxTestWaitTime));
+                     received = value;
+                     return true;
+                   }));
+    returned.store(true);
+  });
+  ASSERT_TRUE(entered.WaitForEventFor(userver::utest::kMaxTestWaitTime));
+  EXPECT_FALSE(returned.load());
+  auto delivery = userver::utils::Async("deferred-substream-result", [&] {
+    EXPECT_EQ(std::this_thread::get_id(), worker);
+    source->consume(savedContext, servicelib::Payload<int>::make(42));
+  });
+  const bool collectorStarted = collectorEntered.WaitForEventFor(
+      userver::utest::kMaxTestWaitTime);
+  EXPECT_TRUE(collectorStarted);
+  EXPECT_FALSE(returned.load());
+  releaseCollector.Send();
+  delivery.Get();
+  call.Get();
+  EXPECT_TRUE(returned.load());
+  EXPECT_EQ(received, 42);
+}
+
+TEST(Operators, DirectAsyncMetadataKeepsNestedCallsInline) {
+  auto& app = operatorApp();
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(async);
+    std::vector<int> order;
+    const auto worker = std::this_thread::get_id();
+    servicelib::DirectCaller<int>* caller = nullptr;
+    auto input = inputStream<int>(app, async ? 632 : 630, "inline-call-input");
+    auto& sink = input->sink(
+        sinkConfig(async ? 633 : 631, "inline-call-output"),
+        servicelib::StreamType<int>{},
+        servicelib::make_function(
+            [&](servicelib::MessageContext context, const int& value) {
+              EXPECT_EQ(std::this_thread::get_id(), worker);
+              EXPECT_EQ(context.streamId(), "inline-nested-call");
+              order.push_back(value);
+              if (value == 1) {
+                caller->consume(context, servicelib::Payload<int>::make(2));
+              }
+              order.push_back(-value);
+            },
+            "inline-call-test"));
+    servicelib::DirectCaller<int> direct{sink, callerParams(), async};
+    caller = &direct;
+    direct.consume(
+        servicelib::MessageContext{}.withStreamId("inline-nested-call"),
+        servicelib::Payload<int>::make(1));
+    EXPECT_EQ(order, (std::vector<int>{1, 2, -2, -1}));
+    EXPECT_EQ(direct.isAsync(), async);
+    EXPECT_EQ(direct.statistics().count(), 2);
+  }
 }

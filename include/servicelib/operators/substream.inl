@@ -45,8 +45,9 @@ class SubStreamCall final {
     }
     try {
       if (collector_->out(*context_, value)) {
-        completed_ = !closed_.exchange(true, std::memory_order_acq_rel);
-        if (completed_) done_.Send();
+        // Cancellation stops new deliveries, not an admitted successful callback.
+        completed_ = true;
+        if (!closed_.exchange(true, std::memory_order_acq_rel)) done_.Send();
       }
     } catch (...) {
       error_ = std::current_exception();
@@ -66,7 +67,7 @@ class SubStreamCall final {
     userver::engine::TaskCancellationBlocker cancellationBlocker;
     std::lock_guard lock(callbackMutex_);
     if (error_) std::rethrow_exception(error_);
-    if (!completed_) throw std::runtime_error("SubStream invocation cancelled");
+    if (!completed_) throw OperationCancelledError("SubStream invocation cancelled");
   }
 
   void close() noexcept {
@@ -159,7 +160,7 @@ class SubStream final : public Stream<T, StreamConsumer<T>, Context>,
     if (!resultSource_ || !this->hasConsumer()) {
       throw StreamException("SubStream body and result source must be configured");
     }
-    if (context.cancelled()) throw std::runtime_error("SubStream invocation cancelled");
+    if (context.cancelled()) throw OperationCancelledError("SubStream invocation cancelled");
     [[maybe_unused]] auto invocation = this->context().beginInputInvocation();
     auto call = std::make_shared<Call>(context, std::move(collector));
     struct Cleanup final {

@@ -1,12 +1,16 @@
 #include <atomic>
+#include <chrono>
 #include <exception>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include <userver/engine/single_use_event.hpp>
+#include <userver/engine/sleep.hpp>
 #include <userver/utest/utest.hpp>
+#include <userver/utils/async.hpp>
 
 #include <servicelib/datasink/grpc/userver.hpp>
 #include <servicelib/datasource/grpc/userver.hpp>
@@ -15,6 +19,7 @@
 #include <servicelib/runtime/testmetrics/testmetrics.hpp>
 
 #include "test_sink_endpoint_stream.hpp"
+#include "test_endpoint_lifecycle.hpp"
 
 namespace {
 
@@ -336,6 +341,48 @@ struct FakeBidiStream {
   }
 };
 
+template <typename Cell>
+void CheckCancelledSessionWaiter() {
+  auto cell = std::make_shared<Cell>();
+  userver::engine::SingleUseEvent entered;
+  std::atomic<bool> returned{false};
+  auto waiter = userver::utils::Async("grpc-session-waiter", [&] {
+    entered.Send();
+    cell->wait();
+    EXPECT_TRUE(cell->ready);
+    EXPECT_NE(cell->error, nullptr);
+    returned.store(true);
+  });
+  entered.Wait();
+  waiter.RequestCancel();
+  userver::engine::SleepFor(std::chrono::milliseconds(5));
+  EXPECT_FALSE(returned.load());
+  cell->error = std::make_exception_ptr(std::runtime_error("creation failed"));
+  cell->markReady();
+  EXPECT_NO_THROW(waiter.Get());
+  EXPECT_TRUE(returned.load());
+}
+
+UTEST(GrpcDataSink, ClientStreamingCancellationWaitsForSessionPublication) {
+  auto client = [](userver::ugrpc::client::CallOptions) {
+    return FakeClientStream{std::make_shared<FakeClientStreamState>()};
+  };
+  using Endpoint = servicelib::datasink::grpc::ClientStreamingEndpoint<
+      std::string, std::string, std::string, std::string, SinkHandler,
+      decltype(client)>;
+  CheckCancelledSessionWaiter<typename Endpoint::SessionCell>();
+}
+
+UTEST(GrpcDataSink, BidiCancellationWaitsForSessionPublication) {
+  auto client = [](userver::ugrpc::client::CallOptions) {
+    return FakeBidiStream{std::make_shared<FakeBidiState>()};
+  };
+  using Endpoint = servicelib::datasink::grpc::BidirectionalStreamingEndpoint<
+      std::string, std::string, std::string, std::string, SinkHandler,
+      decltype(client)>;
+  CheckCancelledSessionWaiter<typename Endpoint::SessionCell>();
+}
+
 UTEST(GrpcDataSink, SupportsAllFourMethodTypesAndStreamIdSessions) {
   TestEnvironment environment;
   std::vector<std::string> responses;
@@ -415,4 +462,305 @@ UTEST(GrpcDataSink, SupportsAllFourMethodTypesAndStreamIdSessions) {
                                                  "client:last", "bidi:last"}));
 }
 
+struct GrpcConsumeGate final {
+  userver::engine::SingleUseEvent entered;
+  userver::engine::SingleUseEvent release;
+
+  void wait() {
+    entered.Send();
+    EXPECT_EQ(release.WaitUntil(userver::engine::Deadline::FromDuration(
+                  std::chrono::seconds{2})),
+              userver::engine::FutureStatus::kReady);
+  }
+};
+
+struct GatedGrpcSinkHandler final {
+  using State = int;
+  GrpcConsumeGate* responseGate;
+  GrpcConsumeGate* endGate;
+  std::vector<std::string>* responses;
+
+  servicelib::BeginResult<State> beginRequest(
+      servicelib::MessageContext context, auto&) {
+    return {std::move(context), 0};
+  }
+  void consumeMessage(servicelib::MessageContext, auto&, State&,
+                      const std::string& value, auto& sender, auto) {
+    sender.send(value);
+  }
+  void handleResponse(servicelib::MessageContext, auto&, State&,
+                      const std::string& response) {
+    responseGate->wait();
+    responses->push_back(response);
+  }
+  void endRequest(servicelib::MessageContext, auto&, std::exception_ptr error,
+                  State&) noexcept {
+    EXPECT_EQ(error, nullptr);
+    endGate->wait();
+  }
+};
+
+template <bool ServerStreaming>
+void CheckGrpcSynchronousConsume() {
+  TestEnvironment environment;
+  GrpcConsumeGate transportGate;
+  GrpcConsumeGate responseGate;
+  GrpcConsumeGate endGate;
+  std::vector<std::string> responses;
+  std::atomic<bool> returned{false};
+  TestSinkEndpointStream<std::string, std::string> stream{
+      environment, ServerStreaming ? 2 : 1};
+  struct Rpc final {
+    bool read = false;
+    bool Read(std::string& response) {
+      if (read) return false;
+      read = true;
+      response = "response";
+      return true;
+    }
+  };
+  auto client = [&](const std::string&, userver::ugrpc::client::CallOptions) {
+    transportGate.wait();
+    if constexpr (ServerStreaming) {
+      return Rpc{};
+    } else {
+      return std::string{"response"};
+    }
+  };
+  using Endpoint = std::conditional_t<
+      ServerStreaming,
+      servicelib::datasink::grpc::ServerStreamingEndpoint<
+          std::string, std::string, std::string, std::string,
+          GatedGrpcSinkHandler, decltype(client)>,
+      servicelib::datasink::grpc::NoStreamingEndpoint<
+          std::string, std::string, std::string, std::string,
+          GatedGrpcSinkHandler, decltype(client)>>;
+  Endpoint endpoint{stream,
+                    GatedGrpcSinkHandler{&responseGate, &endGate, &responses},
+                    client};
+  auto task = userver::utils::Async("grpc-consume-return-contract", [&] {
+    endpoint.consume(servicelib::MessageContext{},
+                     servicelib::Payload<std::string>::make("payload"));
+    returned.store(true);
+  });
+  for (auto* gate : {&transportGate, &responseGate, &endGate}) {
+    EXPECT_EQ(gate->entered.WaitUntil(userver::engine::Deadline::FromDuration(
+                  std::chrono::seconds{2})),
+              userver::engine::FutureStatus::kReady);
+    EXPECT_FALSE(returned.load());
+    gate->release.Send();
+  }
+  task.Get();
+  EXPECT_TRUE(returned.load());
+  EXPECT_EQ(responses, (std::vector<std::string>{"response"}));
+}
+
+UTEST(GrpcDataSink, UnaryConsumeWaitsForResponseAndFinalizer) {
+  CheckGrpcSynchronousConsume<false>();
+}
+
+UTEST(GrpcDataSink, ServerStreamingConsumeWaitsForResponseAndFinalizer) {
+  CheckGrpcSynchronousConsume<true>();
+}
+
+struct FinishBeforeConsumeReturnHandler final {
+  using State = int;
+  userver::engine::SingleUseEvent* finishEntered;
+  userver::engine::SingleUseEvent* ended;
+
+  servicelib::BeginResult<State> beginRequest(
+      servicelib::MessageContext context, auto&) {
+    return {std::move(context), 0};
+  }
+  void consumeMessage(servicelib::MessageContext, auto&, State&,
+                      const std::string& value, auto& sender, auto result) {
+    sender.send(value);
+    result.done();
+    // Go starts CloseAndRecv on Done, while ConsumeMessage may still be active.
+    EXPECT_EQ(finishEntered->WaitUntil(userver::engine::Deadline::FromDuration(
+                  std::chrono::seconds{1})),
+              userver::engine::FutureStatus::kReady);
+  }
+  void handleResponse(servicelib::MessageContext, auto&, State&,
+                      const std::string& response) {
+    EXPECT_EQ(response, "response");
+  }
+  void endRequest(servicelib::MessageContext, auto&, std::exception_ptr error,
+                  State&) noexcept {
+    EXPECT_EQ(error, nullptr);
+    ended->Send();
+  }
+};
+
+UTEST(GrpcDataSink, ClientStreamingDoneStartsFinishBeforeConsumeReturns) {
+  TestEnvironment environment;
+  userver::engine::SingleUseEvent finishEntered;
+  userver::engine::SingleUseEvent ended;
+  struct Rpc final {
+    userver::engine::SingleUseEvent* finishEntered;
+    void WriteAndCheck(const std::string&) {}
+    std::string Finish() {
+      finishEntered->Send();
+      return "response";
+    }
+  };
+  auto client = [&](userver::ugrpc::client::CallOptions) {
+    return Rpc{&finishEntered};
+  };
+  TestSinkEndpointStream<std::string, std::string> stream{environment, 3};
+  servicelib::datasink::grpc::ClientStreamingEndpoint<
+      std::string, std::string, std::string, std::string,
+      FinishBeforeConsumeReturnHandler, decltype(client)>
+      endpoint{stream,
+               FinishBeforeConsumeReturnHandler{&finishEntered, &ended}, client};
+  endpoint.start(servicelib::Context{});
+  endpoint.consume(servicelib::MessageContext{}.withStreamId("finish-order"),
+                   servicelib::Payload<std::string>::make("payload"));
+  EXPECT_EQ(ended.WaitUntil(userver::engine::Deadline::FromDuration(
+                std::chrono::seconds{2})),
+            userver::engine::FutureStatus::kReady);
+  endpoint.stop(servicelib::Context{});
+}
+
+struct FinalizingSessionProbe final {
+  std::atomic<int> opened{0};
+  std::atomic<int> finalized{0};
+  GrpcConsumeGate firstFinalizer;
+};
+
+struct FinalizingSessionHandler final {
+  using State = int;
+  FinalizingSessionProbe* probe;
+
+  servicelib::BeginResult<State> beginRequest(
+      servicelib::MessageContext context, auto&) {
+    return {std::move(context), 0};
+  }
+  void consumeMessage(servicelib::MessageContext, auto&, State&,
+                      const std::string& value, auto& sender, auto result) {
+    sender.send(value);
+    result.done();
+  }
+  void handleResponse(servicelib::MessageContext, auto&, State&,
+                      const std::string&) {}
+  void endRequest(servicelib::MessageContext, auto&, std::exception_ptr,
+                  State&) noexcept {
+    if (probe->finalized.fetch_add(1) == 0) probe->firstFinalizer.wait();
+  }
+};
+
+template <bool Bidirectional>
+void CheckStreamingReservationDuringFinalizer() {
+  TestEnvironment environment;
+  FinalizingSessionProbe probe;
+  struct RpcState final {
+    userver::engine::SingleUseEvent done;
+  };
+  struct Rpc final {
+    std::shared_ptr<RpcState> state;
+    void WriteAndCheck(const std::string&) {}
+    bool WritesDone() {
+      state->done.Send();
+      return true;
+    }
+    std::string Finish() { return "response"; }
+    bool Read(std::string&) {
+      state->done.Wait();
+      return false;
+    }
+  };
+  auto client = [&](userver::ugrpc::client::CallOptions) {
+    probe.opened.fetch_add(1);
+    return Rpc{std::make_shared<RpcState>()};
+  };
+  TestSinkEndpointStream<std::string, std::string> stream{
+      environment, Bidirectional ? 4 : 3};
+  using Endpoint = std::conditional_t<
+      Bidirectional,
+      servicelib::datasink::grpc::BidirectionalStreamingEndpoint<
+          std::string, std::string, std::string, std::string,
+          FinalizingSessionHandler, decltype(client)>,
+      servicelib::datasink::grpc::ClientStreamingEndpoint<
+          std::string, std::string, std::string, std::string,
+          FinalizingSessionHandler, decltype(client)>>;
+  Endpoint endpoint{stream, FinalizingSessionHandler{&probe}, client};
+  endpoint.start(servicelib::Context{});
+  const auto context =
+      servicelib::MessageContext{}.withStreamId("held-finalizer");
+  endpoint.consume(context, servicelib::Payload<std::string>::make("first"));
+  EXPECT_EQ(probe.firstFinalizer.entered.WaitUntil(
+                userver::engine::Deadline::FromDuration(std::chrono::seconds{2})),
+            userver::engine::FutureStatus::kReady);
+  endpoint.consume(context, servicelib::Payload<std::string>::make("second"));
+  EXPECT_EQ(probe.opened.load(), 1)
+      << "An RPC with this ID is still inside EndRequest";
+  probe.firstFinalizer.release.Send();
+  endpoint.stop(servicelib::Context{});
+}
+
+UTEST(GrpcDataSink, ClientStreamingReservesIdWhileFinalizerIsActive) {
+  CheckStreamingReservationDuringFinalizer<false>();
+}
+
+UTEST(GrpcDataSink, BidiReservesIdWhileFinalizerIsActive) {
+  CheckStreamingReservationDuringFinalizer<true>();
+}
+
+UTEST(GrpcConnectors, StopsConsumersOfOneIdInReverseRegistrationOrder) {
+  TestEnvironment environment;
+  TestSinkEndpointStream<std::string, std::string> stream{environment, 1};
+  auto sink = servicelib::datasink::grpc::UserverDataSink::make(stream);
+  EndpointLifecycleEvents events;
+  using Endpoint =
+      StopCallbackEndpoint<servicelib::datasink::grpc::IEndpoint>;
+  sink->addEndpoint(std::make_shared<Endpoint>(1, [&] { events.add("first"); }));
+  sink->addEndpoint(std::make_shared<Endpoint>(1, [&] { events.add("second"); }));
+  sink->start(servicelib::Context{});
+  sink->stop(servicelib::Context{});
+  EXPECT_EQ(events.snapshot(), (std::vector<std::string>{"second", "first"}));
+}
+
+UTEST(GrpcConnectors, StopsDifferentIdsConcurrentlyAndWaitsForBoth) {
+  TestEnvironment environment;
+  TestSinkEndpointStream<std::string, std::string> stream{environment, 1};
+  auto sink = servicelib::datasink::grpc::UserverDataSink::make(stream);
+  GrpcConsumeGate first;
+  GrpcConsumeGate second;
+  using Endpoint =
+      StopCallbackEndpoint<servicelib::datasink::grpc::IEndpoint>;
+  const auto stop = [](GrpcConsumeGate& gate) {
+    gate.entered.Send();
+    EXPECT_EQ(gate.release.WaitUntil(userver::engine::Deadline::FromDuration(
+                  std::chrono::seconds{5})),
+              userver::engine::FutureStatus::kReady);
+  };
+  sink->addEndpoint(std::make_shared<Endpoint>(1, [&] { stop(first); }));
+  sink->addEndpoint(std::make_shared<Endpoint>(2, [&] { stop(second); }));
+  sink->start(servicelib::Context{});
+  std::atomic<bool> returned{false};
+  auto task = userver::utils::Async("connector-stop-contract", [&] {
+    sink->stop(servicelib::Context{});
+    returned.store(true);
+  });
+  EXPECT_EQ(first.entered.WaitUntil(userver::engine::Deadline::FromDuration(
+                std::chrono::seconds{1})),
+            userver::engine::FutureStatus::kReady);
+  EXPECT_EQ(second.entered.WaitUntil(userver::engine::Deadline::FromDuration(
+                std::chrono::seconds{1})),
+            userver::engine::FutureStatus::kReady);
+  EXPECT_FALSE(returned.load());
+  first.release.Send();
+  second.release.Send();
+  task.Get();
+  EXPECT_TRUE(returned.load());
+}
+
 }  // namespace
+
+#include "grpc_source_lifetime_review_test.hpp"
+#include "grpc_finalization_matrix_test.hpp"
+#include "grpc_source_completion_matrix_test.hpp"
+#include "grpc_source_cancellation_matrix_test.hpp"
+#include "grpc_source_callback_drain_test.hpp"
+#include "grpc_failed_open_reentry_test.hpp"
+#include "grpc_sink_context_cancel_test.hpp"

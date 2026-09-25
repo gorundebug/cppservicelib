@@ -94,6 +94,11 @@ if(SERVICELIB_BUILD_TESTS)
       tests/serde_test.cpp)
   servicelib_add_test(servicelib_http_endpoints_test
       tests/http_endpoints_test.cpp)
+  servicelib_add_test(servicelib_http_response_contract_test
+      tests/http_response_contract_test.cpp)
+  servicelib_add_test(servicelib_http_body_cooperation_test
+      tests/http_body_cooperation_test.cpp)
+  set_tests_properties(servicelib_http_body_cooperation_test PROPERTIES TIMEOUT 15)
   servicelib_add_test(servicelib_grpc_endpoints_test
       tests/grpc_endpoints_test.cpp
       userver::grpc)
@@ -102,6 +107,33 @@ if(SERVICELIB_BUILD_TESTS)
       userver::kafka RdKafka::rdkafka)
   servicelib_add_test(servicelib_operators_test
       tests/operators_compile_test.cpp)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  find_package(Threads REQUIRED)
+  add_executable(servicelib_process_shutdown_probe
+      tests/process_shutdown_probe.cpp)
+  target_link_libraries(servicelib_process_shutdown_probe PRIVATE
+      servicelib Threads::Threads)
+  add_test(NAME servicelib_process_shutdown_test
+      COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/process_shutdown_test.py
+          $<TARGET_FILE:servicelib_process_shutdown_probe>)
+  set_tests_properties(servicelib_process_shutdown_test PROPERTIES TIMEOUT 60)
+  add_test(NAME servicelib_callback_failure_process_test
+      COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/callback_failure_process_test.py
+          $<TARGET_FILE:servicelib_taskpool_test>
+          $<TARGET_FILE:servicelib_other_pools_test>
+          $<TARGET_FILE:servicelib_operators_test>)
+  set_tests_properties(servicelib_callback_failure_process_test
+      PROPERTIES TIMEOUT 150)
+  add_test(NAME servicelib_nonstandard_callback_failure_process_test
+      COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/nonstandard_callback_failure_process_test.py
+          $<TARGET_FILE:servicelib_taskpool_test>
+          $<TARGET_FILE:servicelib_other_pools_test>
+          $<TARGET_FILE:servicelib_operators_test>)
+  set_tests_properties(servicelib_nonstandard_callback_failure_process_test
+      PROPERTIES TIMEOUT 90)
   servicelib_add_test(servicelib_config_loader_test
       tests/config_loader_test.cpp)
   servicelib_add_test(servicelib_schedule_test

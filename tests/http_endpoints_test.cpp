@@ -1,3 +1,4 @@
+#include <atomic>
 #include <exception>
 #include <memory>
 #include <string>
@@ -16,10 +17,11 @@
 #include <servicelib/runtime/environment/environment.hpp>
 #include <servicelib/runtime/testlog/testlog.hpp>
 #include <servicelib/runtime/testmetrics/testmetrics.hpp>
-#include <servicelib/runtime/testtracing/testtracing.hpp>
 #include <servicelib/transformation/streams.hpp>
 
 #include "test_sink_endpoint_stream.hpp"
+#include "test_propagating_tracing.hpp"
+#include "test_endpoint_lifecycle.hpp"
 
 namespace {
 
@@ -31,6 +33,10 @@ class TestConfig final : public servicelib::config::IConfig {
     endpoint.idDataConnector = 2;
     endpoint.httpMethodType = servicelib::api::HTTPMethodType::kPOST;
     endpoint.path = "/messages";
+    secondEndpoint = endpoint;
+    secondEndpoint.id = 2;
+    secondEndpoint.name = "other-messages";
+    secondEndpoint.path = "/other-messages";
     connector.id = 2;
     connector.name = "http";
     connector.host = "127.0.0.1";
@@ -50,7 +56,7 @@ class TestConfig final : public servicelib::config::IConfig {
   }
   std::vector<servicelib::config::EndpointConfigRef> GetEndpoints()
       const override {
-    return {endpoint};
+    return {endpoint, secondEndpoint};
   }
   std::vector<const servicelib::config::PoolConfig*> GetPools() const override {
     return {};
@@ -67,6 +73,7 @@ class TestConfig final : public servicelib::config::IConfig {
   }
 
   servicelib::config::HttpEndpointConfig endpoint;
+  servicelib::config::HttpEndpointConfig secondEndpoint;
   servicelib::config::HttpDataConnectorConfig connector;
 };
 
@@ -109,7 +116,7 @@ class TestEnvironment final : public servicelib::IRuntimeEnvironment {
   servicelib::config::ServiceConfig serviceConfig_;
   servicelib::testlog::TestLog log_;
   servicelib::testmetrics::TestMetrics metrics_;
-  servicelib::testtracing::TestTracing tracing_;
+  PropagatingTestTracing tracing_;
   bool tracingEnabled_;
 };
 
@@ -569,8 +576,34 @@ struct SinkHandler {
   }
 };
 
-UTEST(HttpDataSink, ExecutesUserRequestAndPropagatesStreamId) {
+UTEST(HttpDataSink, DisabledTracingPreservesOnlyStreamCorrelation) {
   TestEnvironment environment;
+  MockSinkClient client;
+  int endCalls = 0;
+  bool hadError = true;
+  TestSinkEndpointStream<std::string, std::string> stream{environment, 1};
+  servicelib::datasink::http::UserverEndpoint<std::string, std::string, SinkHandler>
+      endpoint{stream, client, SinkHandler{&endCalls, &hadError}};
+  endpoint.consume(servicelib::MessageContext{}
+                       .withStreamId("parent")
+                       .withSampling(true)
+                       .withTrace({"4bf92f3577b34da6a3ce929d0e0e4736",
+                                   "00f067aa0ba902b7", true, "vendor=value",
+                                   "tenant=acme"}),
+                   servicelib::Payload<std::string>::make("payload"));
+  ASSERT_TRUE(client.lastRequest.has_value());
+  const auto& headers = client.lastRequest->headers;
+  constexpr userver::http::headers::PredefinedHeader streamIdHeader{"x-stream-id"};
+  EXPECT_NE(headers.find(streamIdHeader), headers.end());
+  for (const auto* name : {"traceparent", "tracestate", "baggage", "X-Trace"}) {
+    EXPECT_EQ(headers.find(name), headers.end());
+  }
+  EXPECT_EQ(endCalls, 1);
+  EXPECT_FALSE(hadError);
+}
+
+UTEST(HttpDataSink, ExecutesUserRequestAndPropagatesStreamId) {
+  TestEnvironment environment{true};
   MockSinkClient client;
   int endCalls = 0;
   bool hadError = true;
@@ -601,7 +634,7 @@ UTEST(HttpDataSink, ExecutesUserRequestAndPropagatesStreamId) {
   EXPECT_FALSE(requestStreamId.empty());
   EXPECT_NE(requestStreamId, "stream-42");
   EXPECT_EQ(client.lastRequest->headers[std::string{"traceparent"}],
-            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01");
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000001-01");
   EXPECT_EQ(client.lastRequest->headers[std::string{"tracestate"}],
             "vendor=value");
   EXPECT_EQ(client.lastRequest->headers[std::string{"baggage"}],
@@ -738,6 +771,145 @@ UTEST(HttpConnectors, DedicatedListenerIsRejected) {
       servicelib::datasource::http::UserverDataSource::make(environment,
                                                             *input),
       std::invalid_argument);
+}
+
+struct HttpConsumeGate final {
+  userver::engine::SingleUseEvent entered;
+  userver::engine::SingleUseEvent release;
+
+  void wait() {
+    entered.Send();
+    EXPECT_EQ(release.WaitUntil(userver::engine::Deadline::FromDuration(
+                  std::chrono::seconds{2})),
+              userver::engine::FutureStatus::kReady);
+  }
+};
+
+class GatedHttpClient final : public servicelib::datasink::http::Client {
+ public:
+  explicit GatedHttpClient(HttpConsumeGate& gate) : gate_(gate) {}
+  servicelib::datasink::http::Response perform(
+      servicelib::datasink::http::Request) override {
+    gate_.wait();
+    return {userver::clients::http::Status::kOk, "response", {}};
+  }
+
+ private:
+  HttpConsumeGate& gate_;
+};
+
+struct GatedHttpSinkHandler final : SinkHandler {
+  HttpConsumeGate* responseGate;
+  HttpConsumeGate* endGate;
+
+  void handleResponse(servicelib::MessageContext context, auto& streamContext,
+                      State& state,
+                      const servicelib::datasink::http::Response& response) {
+    responseGate->wait();
+    SinkHandler::handleResponse(std::move(context), streamContext, state,
+                                response);
+  }
+  void endRequest(servicelib::MessageContext context, auto& streamContext,
+                  std::exception_ptr error, State& state) noexcept {
+    endGate->wait();
+    SinkHandler::endRequest(std::move(context), streamContext, error, state);
+  }
+};
+
+UTEST(HttpDataSink, ConsumeWaitsForTransportResponseAndFinalizer) {
+  TestEnvironment environment;
+  HttpConsumeGate transportGate;
+  HttpConsumeGate responseGate;
+  HttpConsumeGate endGate;
+  GatedHttpClient client{transportGate};
+  int endCalls = 0;
+  bool hadError = true;
+  std::string result;
+  std::atomic<bool> returned{false};
+  TestSinkEndpointStream<std::string, std::string> stream{
+      environment, 1,
+      [&](servicelib::MessageContext, servicelib::Payload<std::string> value) {
+        result = value.get();
+      }};
+  servicelib::datasink::http::UserverEndpoint<
+      std::string, std::string, GatedHttpSinkHandler>
+      endpoint{stream, client,
+               GatedHttpSinkHandler{{&endCalls, &hadError}, &responseGate,
+                                    &endGate}};
+  auto task = userver::utils::Async("http-consume-return-contract", [&] {
+    endpoint.consume(servicelib::MessageContext{},
+                     servicelib::Payload<std::string>::make("payload"));
+    returned.store(true);
+  });
+  for (auto* gate : {&transportGate, &responseGate, &endGate}) {
+    EXPECT_EQ(gate->entered.WaitUntil(userver::engine::Deadline::FromDuration(
+                  std::chrono::seconds{2})),
+              userver::engine::FutureStatus::kReady);
+    EXPECT_FALSE(returned.load());
+    gate->release.Send();
+  }
+  task.Get();
+  EXPECT_TRUE(returned.load());
+  EXPECT_EQ(result, "response");
+  EXPECT_EQ(endCalls, 1);
+  EXPECT_FALSE(hadError);
+}
+
+UTEST(HttpConnectors, StopsConsumersOfOneIdInReverseRegistrationOrder) {
+  TestEnvironment environment;
+  TestSinkEndpointStream<std::string, std::string> stream{environment, 1};
+  auto sink = servicelib::datasink::http::UserverDataSink::make(stream);
+  EndpointLifecycleEvents events;
+  using Endpoint =
+      StopCallbackEndpoint<servicelib::datasink::http::IEndpoint>;
+  sink->addEndpoint(std::make_shared<Endpoint>(1, [&] { events.add("first"); }));
+  sink->addEndpoint(std::make_shared<Endpoint>(1, [&] { events.add("second"); }));
+  sink->start(servicelib::Context{});
+  sink->stop(servicelib::Context{});
+  EXPECT_EQ(events.snapshot(), (std::vector<std::string>{"second", "first"}));
+}
+
+UTEST_MT(HttpConnectors, StopsDifferentIdsConcurrentlyEvenIfOneFails, 1) {
+  for (const bool failFirst : {false, true}) {
+    SCOPED_TRACE(failFirst);
+    TestEnvironment environment;
+    TestSinkEndpointStream<std::string, std::string> stream{environment, 1};
+    auto sink = servicelib::datasink::http::UserverDataSink::make(stream);
+    HttpConsumeGate first;
+    HttpConsumeGate second;
+    userver::engine::SingleUseEvent firstFinished;
+    using Endpoint = StopCallbackEndpoint<servicelib::datasink::http::IEndpoint>;
+    sink->addEndpoint(std::make_shared<Endpoint>(1, [&] {
+      first.wait();
+      firstFinished.Send();
+      if (failFirst) throw std::runtime_error("first endpoint stop failed");
+    }));
+    sink->addEndpoint(std::make_shared<Endpoint>(2, [&] { second.wait(); }));
+    sink->start(servicelib::Context{});
+    bool returned = false;
+    auto stopTask = userver::utils::Async("http-distinct-endpoint-stop", [&] {
+      if (failFirst) {
+        EXPECT_THROW(sink->stop(servicelib::Context{}), std::runtime_error);
+      } else {
+        EXPECT_NO_THROW(sink->stop(servicelib::Context{}));
+      }
+      returned = true;
+    });
+    for (auto* gate : {&first, &second}) {
+      EXPECT_EQ(gate->entered.WaitUntil(userver::engine::Deadline::FromDuration(
+                    std::chrono::seconds{1})),
+                userver::engine::FutureStatus::kReady);
+    }
+    EXPECT_FALSE(returned);
+    first.release.Send();
+    EXPECT_EQ(firstFinished.WaitUntil(userver::engine::Deadline::FromDuration(
+                  std::chrono::seconds{1})),
+              userver::engine::FutureStatus::kReady);
+    EXPECT_FALSE(returned);
+    second.release.Send();
+    stopTask.Get();
+    EXPECT_TRUE(returned);
+  }
 }
 
 }  // namespace

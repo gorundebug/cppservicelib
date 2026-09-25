@@ -10,12 +10,14 @@
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include <userver/engine/deadline.hpp>
+#include <userver/engine/task/cancel.hpp>
 #include <userver/ugrpc/client/call_options.hpp>
 #include <userver/utils/uuid7.hpp>
 
@@ -28,6 +30,39 @@
 #include <servicelib/runtime/telemetry/userver/sampling.hpp>
 
 namespace servicelib::datasink::grpc {
+
+namespace detail {
+
+// Only for the endpoint-owned streaming completion/read task, never the
+// caller's business task. The native transport already honors task cancellation.
+class StreamingTaskCancellation final {
+  struct CancelTask final {
+    userver::engine::TaskCancellationToken task;
+    void operator()() { task.RequestCancel(); }
+  };
+  using StopCallback = std::stop_callback<CancelTask>;
+
+ public:
+  explicit StreamingTaskCancellation(const MessageContext& context)
+      : onStop_(context.stopToken(),
+                CancelTask{userver::engine::current_task::GetCancellationToken()}) {
+    externalStops_.reserve(context.externalStopTokens().size());
+    for (const auto& token : context.externalStopTokens()) {
+      externalStops_.emplace_back(std::make_unique<StopCallback>(
+          token, CancelTask{userver::engine::current_task::GetCancellationToken()}));
+    }
+    if (context.deadline()) {
+      userver::engine::current_task::SetDeadline(
+          userver::engine::Deadline::FromTimePoint(*context.deadline()));
+    }
+  }
+
+ private:
+  StopCallback onStop_;
+  std::vector<std::unique_ptr<StopCallback>> externalStops_;
+};
+
+}  // namespace detail
 
 template <typename Req>
 class Sender final {
@@ -133,7 +168,7 @@ class UserverDataSink final {
     for (const auto& endpoint : endpoints_) endpoint->start(context);
   }
   void stop(Context context) {
-    for (const auto& endpoint : endpoints_) endpoint->stop(context);
+    servicelib::detail::stopSinkEndpoints(endpoints_, std::move(context));
   }
 
  private:

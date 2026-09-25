@@ -10,15 +10,18 @@
 #include <optional>
 #include <shared_mutex>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include <userver/engine/mutex.hpp>
 #include <userver/engine/shared_mutex.hpp>
 #include <userver/engine/single_use_event.hpp>
 #include <userver/engine/task/cancel.hpp>
 #include <userver/engine/task/current_task.hpp>
+#include <userver/engine/wait_any.hpp>
 #include <userver/tracing/manager.hpp>
 #include <userver/tracing/span.hpp>
 #include <userver/ugrpc/server/call_context.hpp>
@@ -41,6 +44,35 @@ class RpcCancelledError final : public std::runtime_error {
  public:
   RpcCancelledError() : std::runtime_error("gRPC request cancelled") {}
 };
+
+inline void waitForResult(const MessageContext& context,
+                          userver::engine::SingleUseEvent& ready) {
+  if (ready.IsReady()) return;
+  if (context.cancelled()) throw RpcCancelledError();
+
+  userver::engine::SingleUseEvent cancelled;
+  std::atomic<bool> cancellationSent{false};
+  auto cancel = [&] {
+    if (!cancellationSent.exchange(true, std::memory_order_acq_rel)) {
+      cancelled.Send();
+    }
+  };
+  std::stop_callback onStop(context.stopToken(), cancel);
+  using StopCallback = std::stop_callback<decltype(cancel)>;
+  std::vector<std::unique_ptr<StopCallback>> externalStops;
+  externalStops.reserve(context.externalStopTokens().size());
+  for (const auto& token : context.externalStopTokens()) {
+    externalStops.emplace_back(std::make_unique<StopCallback>(token, cancel));
+  }
+  auto wait = userver::engine::MakeWaitAny(ready, cancelled);
+  const auto deadline = context.deadline()
+      ? userver::engine::Deadline::FromTimePoint(*context.deadline())
+      : userver::engine::Deadline{};
+  static_cast<void>(wait.WaitUntil(deadline));
+  // Completion remains authoritative if it raced cancellation. Finalization
+  // separately drains active callbacks before releasing their captures.
+  if (!ready.IsReady()) throw RpcCancelledError();
+}
 
 inline MessageContext messageContext(
     userver::ugrpc::server::CallContext& call, bool tracingEnabled = true) {
@@ -156,11 +188,13 @@ struct RequestState final {
   RequestState(MessageContext contextValue, State stateValue,
                std::shared_ptr<Sender<Res>> senderValue,
                std::shared_ptr<tracing::Span> requestSpan)
-      : context(std::move(contextValue)),
+      : context(std::move(contextValue).withExternalCancellation(
+            cancellation.get_token())),
         state(std::move(stateValue)),
         sender(std::move(senderValue)),
         span(std::move(requestSpan)) {}
 
+  std::stop_source cancellation;
   MessageContext context;
   State state;
   std::shared_ptr<Sender<Res>> sender;
@@ -170,6 +204,7 @@ struct RequestState final {
   std::atomic<bool> pendingInserted{false};
   userver::engine::SharedMutex lifetimeMutex;
   userver::engine::Mutex callbacksMutex;
+  bool callbacksClosed{false};
   std::unordered_map<std::string, std::shared_ptr<Callback>> callbacks;
 };
 
@@ -190,6 +225,7 @@ class ResultContext final {
     if (!request_) return;
     auto sharedCallback = std::make_shared<Callback>(std::move(callback));
     std::lock_guard lock(request_->callbacksMutex);
+    if (request_->callbacksClosed) return;
     request_->callbacks[std::move(messageId)] = std::move(sharedCallback);
   }
 
@@ -453,7 +489,7 @@ class Endpoint : public IEndpoint {
 
   void waitDone(const std::shared_ptr<Request>& request) {
     if (hasResult_) {
-      request->done.Wait();
+      waitForResult(request->context, request->done);
       if (auto* traceSpan = request->span.get()) traceSpan->addEvent("done_received");
     }
   }
@@ -474,6 +510,12 @@ class Endpoint : public IEndpoint {
   template <typename CompletionReady>
   void finish(const std::shared_ptr<Request>& request,
               std::exception_ptr& error, CompletionReady&& completionReady) {
+    // Native RPC/task cancellation must reach contexts retained by downstream
+    // work, not merely interrupt this coroutine's wait. Notify before taking
+    // the lifetime lock so cancellation callbacks can finish admitted work.
+    if (userver::engine::current_task::IsCancelRequested()) {
+      request->cancellation.request_stop();
+    }
     userver::engine::TaskCancellationBlocker blocker;
     std::unique_lock lifetimeLock(request->lifetimeMutex);
     if (error && std::forward<CompletionReady>(completionReady)()) {
@@ -487,6 +529,18 @@ class Endpoint : public IEndpoint {
       }
     }
     request->sender->close();
+    // The exclusive lifetime lock has drained admitted result callbacks.
+    // Close registration atomically with clearing the registry, including
+    // callbacks retaining ResultContext (and therefore this Request).
+    decltype(request->callbacks) callbacks;
+    {
+      std::lock_guard lock(request->callbacksMutex);
+      request->callbacksClosed = true;
+      callbacks.swap(request->callbacks);
+    }
+    // Destroy user captures outside callbacksMutex: their destructors may
+    // release or use another saved ResultContext.
+    callbacks.clear();
     try {
       handler_.endRequest(request->context, streamContext_, error,
                           request->state);

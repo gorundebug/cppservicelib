@@ -19,6 +19,7 @@
 #include <userver/engine/condition_variable.hpp>
 #include <userver/engine/mutex.hpp>
 #include <userver/engine/task/task.hpp>
+#include <userver/utils/fast_scope_guard.hpp>
 
 #include <servicelib/runtime/caller.hpp>
 #include <servicelib/runtime/status/status.hpp>
@@ -149,16 +150,14 @@ class StreamExecutionEnvironment : public NotCopyableOrMovable,
     }
     try {
       userver::engine::DetachUnscopedUnsafe(
-          userver::engine::AsyncNoTracing(
+          userver::engine::CriticalAsyncNoTracing(
               [this, task = std::move(task)]() mutable {
-                try {
-                  std::invoke(std::move(task));
-                } catch (...) {
-                  // ParallelCall has no synchronous error channel, matching
-                  // the canonical goroutine-per-message semantics.
-                }
-                std::unique_lock<userver::engine::Mutex> lock(parallelMutex_);
-                if (--parallelActive_ == 0) parallelDrained_.NotifyAll();
+                const userver::utils::FastScopeGuard retire([this]() noexcept {
+                  userver::engine::TaskCancellationBlocker blocker;
+                  std::unique_lock<userver::engine::Mutex> lock(parallelMutex_);
+                  if (--parallelActive_ == 0) parallelDrained_.NotifyAll();
+                });
+                detail::invokeAsyncCallback(std::move(task));
               })
               .AsTask());
     } catch (...) {

@@ -25,6 +25,7 @@
 #endif
 
 #include "test_sink_endpoint_stream.hpp"
+#include "test_propagating_tracing.hpp"
 
 namespace {
 
@@ -497,8 +498,38 @@ struct KafkaSinkHandler final {
   }
 };
 
-UTEST(KafkaDataSink, SendsThroughAdapterAndCollectsDeliveryResult) {
+UTEST(KafkaDataSink, DisabledTracingPreservesOnlyStreamCorrelation) {
   TestEnvironment environment;
+  FakeKafkaProducer producer;
+  producer.actualPartitionCount = 6;
+  int result = 0;
+  TestSinkEndpointStream<std::string, int> stream{
+      environment, 3,
+      [&](servicelib::MessageContext, servicelib::Payload<int> value) {
+        result = value.get();
+      }};
+  servicelib::datasink::kafka::Endpoint<std::string, int, KafkaSinkHandler>
+      endpoint{stream, producer, KafkaSinkHandler{6}};
+  endpoint.start(servicelib::Context{});
+  endpoint.consume(servicelib::MessageContext{}
+                       .withStreamId("incoming-stream")
+                       .withSampling(true)
+                       .withTrace({"0123456789abcdef0123456789abcdef",
+                                   "0123456789abcdef", true, "vendor=value",
+                                   "tenant=test"}),
+                   servicelib::Payload<std::string>::make("payload"));
+  EXPECT_EQ(producer.observedHeaders.at("x-stream-id"), "kafka-sid");
+  for (const auto* name : {"traceparent", "tracestate", "baggage", "x-trace"}) {
+    EXPECT_EQ(producer.observedHeaders.count(name), 0);
+  }
+  EXPECT_EQ(result, 17);
+  endpoint.stop(servicelib::Context{});
+}
+
+UTEST(KafkaDataSink, SendsThroughAdapterAndCollectsDeliveryResult) {
+  PropagatingTestTracing tracing;
+  TestEnvironment environment;
+  environment.tracingEngine = &tracing;
   FakeKafkaProducer producer;
   producer.actualPartitionCount = 6;
   int result = 0;
@@ -521,7 +552,7 @@ UTEST(KafkaDataSink, SendsThroughAdapterAndCollectsDeliveryResult) {
   EXPECT_EQ(producer.observed, "events:key:payload");
   EXPECT_EQ(producer.observedHeaders.at("x-stream-id"), "kafka-sid");
   EXPECT_EQ(producer.observedHeaders.at("traceparent"),
-            "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01");
+            "00-0123456789abcdef0123456789abcdef-0000000000000001-01");
   EXPECT_EQ(producer.observedHeaders.at("tracestate"), "vendor=value");
   EXPECT_EQ(producer.observedHeaders.at("baggage"), "tenant=test");
   EXPECT_EQ(producer.observedHeaders.at("x-trace"), "1");

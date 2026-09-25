@@ -56,6 +56,32 @@ Graph wiring and immutable runtime relationships are established once during sta
 
 The runtime keeps payload ownership explicit, propagates cancellation and deadlines across supported transports, and executes each delay callback exactly once whether its timer or cancellation wins.
 
+An unhandled `std::exception` escaping a `TaskPool`, `PriorityTaskPool`,
+`DelayPool`, or `ParallelCall` callback terminates the process with exit code 2.
+Typed business failures still belong to result values or graph error branches.
+`OperationCancelledError` (including `PoolCancelledError` and cancelled
+SubStream calls), userver `WaitInterruptedException`, and
+`TaskCancelledException` represent expected cancellation and are not fatal at
+these callback boundaries. Synchronous function-call exception propagation is
+unchanged.
+
+Unhandled callback failures are fatal: standard exceptions terminate with exit
+status 2, while non-standard thrown values (for example, `throw 42`) reach
+userver's unconditional `AbortWithStacktrace` boundary and terminate via
+`SIGABRT`. This also applies in Release; it is not a debug-only assertion.
+The runtime does not catch userver's private cancellation unwinder. Expected
+`OperationCancelledError`, `WaitInterruptedException` and `TaskCancelledException`
+remain nonfatal, and typed business errors continue through their normal paths.
+The subprocess regressions cover TaskPool, PriorityTaskPool, Delay and Parallel.
+
+The HTTP sink intentionally retains a buffered response body (`Response::body`
+is a `std::string`). Its business response handler runs after the complete body
+has been received. This is an explicitly accepted difference from Go's
+streaming response API: the installed userver streaming API does not expose
+all post-header transport failures and does not publish headers before the
+first body byte. ServiceLib does not patch userver or substitute a separate
+HTTP transport to conceal these limitations.
+
 ---
 
 ## Operators
@@ -223,3 +249,45 @@ Runtime failures are reported through the runtime exception conventions;
 business failures remain result values or graph error branches. Shared Join
 keys and worker-pool semantics are unchanged. Avoid exhausting a pool while
 waiting for work that needs that pool. Temporal is not supported by C++/userver.
+
+### Generated executable shutdown deadline
+
+The generated userver executable installs `ProcessShutdownGuard` around
+`DaemonMain`. On service shutdown the configured `shutdownTimeout` becomes one
+absolute deadline before the user lifecycle hook, graph drain and teardown.
+Repeated shutdown calls may shorten but cannot renew this deadline. A native
+condition-variable waiter enforces the budget even if coroutine workers or a
+component destructor block. Expiry exits the process without running remaining
+destructors: status 0 for normal shutdown, status 1 after startup failure.
+The service also checks expiry before releasing its business-function owners.
+Runtime-only applications do not install a process-wide exit policy implicitly.
+
+Buffered HTTP reads are cooperative, not blocking worker-thread reads:
+userver's `Request::perform()` waits on its asynchronous response future. The
+`HttpBodyCooperation.BufferedPerformDoesNotBlockOnlyWorker` regression runs with
+one worker, withholds the body at a real TCP peer, and lets a second coroutine
+release that body before the HTTP request completes. A separate streaming or
+buffering transport is not needed to keep the worker available during this wait.
+
+### gRPC cancellation and finalization boundaries
+
+Source endpoints wait for results cooperatively and observe the request
+`MessageContext` deadline, its primary stop token, external cancellation tokens,
+and native userver task cancellation. Cancellation does not destroy state while
+an admitted result callback still uses it; finalization drains callbacks first.
+A result delivered by an admitted callback can win a concurrent cancellation.
+
+Outgoing client-streaming and bidirectional-streaming endpoints connect the
+session context to their existing, endpoint-owned completion/read task. This
+cancels native transport waits and waiting for `Done` without cancelling the
+calling business task, spawning an extra task, or introducing polling.
+
+If opening a streaming RPC fails, its failed session state is published before
+`EndRequest`. Reentry observes that failure instead of waiting for its own
+finalizer. The session ID remains reserved until `EndRequest` and cleanup finish.
+
+When a gRPC source coroutine observes native RPC/task cancellation, finalization
+also cancels the request-local token carried by retained downstream message
+contexts before draining result callbacks. Cancellation remains cooperative;
+this is not forced interruption of arbitrary user code. The generated process
+shutdown guard separately enforces the configured shutdown budget.

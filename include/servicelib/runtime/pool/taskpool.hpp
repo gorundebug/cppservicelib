@@ -60,6 +60,7 @@
 
 #include <userver/concurrent/background_task_storage.hpp>
 #include <userver/engine/async.hpp>
+#include <userver/utils/fast_scope_guard.hpp>
 #include <userver/engine/condition_variable.hpp>
 #include <userver/engine/mutex.hpp>
 #include <userver/engine/single_consumer_event.hpp>
@@ -714,30 +715,18 @@ class TaskPoolImpl final : public ITaskPool {
     const auto start = metricsEnabled_
                            ? std::chrono::steady_clock::now()
                            : std::chrono::steady_clock::time_point{};
-    try {
-      task->fn();
-    } catch (const std::exception& e) {
-      bestEffortTelemetry([this, &e] {
-        env_.getLogger().warn(
-            "task pool task error",
-            {log::Field::Str("pool", name_), log::Field::Err(e)});
-      });
-    } catch (...) {
-      bestEffortTelemetry([this] {
-        env_.getLogger().warn("task pool task error",
-                              {log::Field::Str("pool", name_),
-                               log::Field::Str("error", "<unknown>")});
-      });
-    }
-    task->fn = nullptr;
-    if (metricsEnabled_) {
-      bestEffortMetrics([this] { tasksTotal_->inc(); });
-      const double duration = std::chrono::duration<double>(
-                                  std::chrono::steady_clock::now() - start)
-                                  .count();
-      bestEffortMetrics(
-          [this, duration] { executionDuration_->observe(duration); });
-    }
+    const userver::utils::FastScopeGuard retire([&]() noexcept {
+      task->fn = nullptr;
+      if (metricsEnabled_) {
+        bestEffortMetrics([this] { tasksTotal_->inc(); });
+        const double duration = std::chrono::duration<double>(
+                                    std::chrono::steady_clock::now() - start)
+                                    .count();
+        bestEffortMetrics(
+            [this, duration] { executionDuration_->observe(duration); });
+      }
+    });
+    servicelib::detail::invokeAsyncCallback(task->fn);
   }
 
   // Claims one excess reserved slot. This is called only while mu_ is held;

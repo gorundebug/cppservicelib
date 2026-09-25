@@ -449,9 +449,7 @@ class UserverDataSink final {
   }
 
   void stop(Context context) {
-    for (const auto& endpoint : endpoints_) {
-      endpoint->stop(context);
-    }
+    servicelib::detail::stopSinkEndpoints(endpoints_, std::move(context));
   }
 
  private:

@@ -17,6 +17,8 @@
 #include <servicelib/runtime/testlog/testlog.hpp>
 #include <servicelib/runtime/testmetrics/testmetrics.hpp>
 
+#include "test_callback_failure.hpp"
+
 namespace {
 
 using namespace std::chrono_literals;
@@ -195,7 +197,7 @@ UTEST(TaskPool, LifecycleFifoAndMetrics) {
       2);
 }
 
-UTEST(TaskPool, CancelledContextIsRejectedAndTaskFailureIsIsolated) {
+UTEST(TaskPool, CancelledContextIsRejectedAndInterruptedWaitIsNonfatal) {
   TestEnvironment environment;
   servicelib::pool::TaskPoolImpl pool{kPoolName, environment};
   pool.start(servicelib::Context{});
@@ -211,7 +213,8 @@ UTEST(TaskPool, CancelledContextIsRejectedAndTaskFailureIsIsolated) {
 
   std::atomic<int> completed{0};
   pool.addTask(servicelib::Context{},
-               [] { throw std::runtime_error("expected task failure"); });
+               [] { throw userver::engine::WaitInterruptedException(
+                   userver::engine::TaskCancellationReason::kDeadline); });
   pool.addTask(servicelib::Context{},
                [&] { completed.fetch_add(1, std::memory_order_relaxed); });
   pool.stop(servicelib::Context{});
@@ -226,8 +229,18 @@ UTEST(TaskPool, CancelledContextIsRejectedAndTaskFailureIsIsolated) {
           .counter("task_pool.events_total", EventMetricLabels("task_rejected"))
           .count(),
       1);
-  EXPECT_FALSE(
-      environment.log().entriesAtLevel(servicelib::log::Level::kWarn).empty());
+}
+
+UTEST(TaskPool, UnhandledFailureTerminatesProcess) {
+  if (!std::getenv("SERVICELIB_FATAL_CALLBACK_CHILD")) {
+    GTEST_SKIP() << "Executed by the callback failure subprocess contract";
+  }
+  TestEnvironment environment;
+  servicelib::pool::TaskPoolImpl pool{kPoolName, environment};
+  pool.start(servicelib::Context{});
+  pool.addTask(servicelib::Context{}, ThrowUnhandledCallbackFailure);
+  pool.stop(servicelib::Context{});
+  FAIL() << "unhandled callback exception did not terminate the process";
 }
 
 UTEST(TaskPool, DeadlineMovesQueuedTaskToFront) {

@@ -15,7 +15,7 @@
 #include <stdexcept>
 #include <string>
 
-#include <servicelib/runtime/context.hpp>
+#include <servicelib/runtime/common.hpp>
 
 namespace servicelib::pool {
 
@@ -37,9 +37,9 @@ class PoolNotStartedError final : public std::runtime_error {
 };
 
 // Go analog: ctx.Err() == context.Canceled, checked at the top of AddTask.
-class PoolCancelledError final : public std::runtime_error {
+class PoolCancelledError final : public OperationCancelledError {
  public:
-  PoolCancelledError() : std::runtime_error("request cancelled") {}
+  PoolCancelledError() : OperationCancelledError("request cancelled") {}
 };
 
 class PoolSelfStopError final : public std::runtime_error {

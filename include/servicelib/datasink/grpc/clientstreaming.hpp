@@ -10,6 +10,7 @@
 #include <userver/engine/mutex.hpp>
 #include <userver/engine/shared_mutex.hpp>
 #include <userver/engine/single_use_event.hpp>
+#include <userver/engine/task/cancel.hpp>
 
 #include <servicelib/datasink/grpc/common.hpp>
 #include <servicelib/runtime/store/rotatingmap.hpp>
@@ -39,6 +40,7 @@ class ClientStreamingEndpoint final : public Endpoint<T, R, Handler, E> {
     std::shared_ptr<tracing::Span> span;
     userver::engine::SingleUseEvent done;
     std::atomic<bool> doneSent{false};
+    std::atomic<bool> finalizing{false};
     userver::engine::SharedMutex lifetimeMutex;
   };
 
@@ -65,6 +67,9 @@ class ClientStreamingEndpoint final : public Endpoint<T, R, Handler, E> {
     }
 
     void wait() {
+      // Match Go's readiness-channel wait: cancellation cannot expose a
+      // partially initialized session (or race with publication of its error).
+      userver::engine::TaskCancellationBlocker cancellationBlocker;
       std::unique_lock<pool::engine::Mutex> lock(mu);
       static_cast<void>(cv.Wait(lock, [this] { return ready; }));
     }
@@ -131,11 +136,13 @@ class ClientStreamingEndpoint final : public Endpoint<T, R, Handler, E> {
       } catch (...) {
         const auto error = std::current_exception();
         this->traceError(detachedTrace.span.get(), error, "grpc_call.error");
+        // Publish failure before invoking user code: EndRequest may reenter
+        // Consume with this ID. Keep the reservation until cleanup finishes.
+        cell->error = error;
+        cell->markReady();
         this->callEnd(context, error, begin->state);
         this->metrics_.requestEnd(startedAt, error);
         if (detachedTrace.span) tracing::SpanEnd(detachedTrace.span.get());
-        cell->error = error;
-        cell->markReady();
         dropReservation(streamId, cell);
         return;
       }
@@ -143,7 +150,10 @@ class ClientStreamingEndpoint final : public Endpoint<T, R, Handler, E> {
       cell->markReady();
       tasks_.CriticalAsyncDetach(
           "servicelib-grpc-client-stream",
-          [this, streamId, session] { complete(streamId, session); });
+          [this, streamId, session] {
+            detail::StreamingTaskCancellation cancellation{session->context};
+            complete(streamId, session);
+          });
     } else {
       cell->wait();
       if (cell->error) {
@@ -154,9 +164,16 @@ class ClientStreamingEndpoint final : public Endpoint<T, R, Handler, E> {
       session = cell->session;
     }
 
+    // Reject reentrant calls from finalizers without waiting for their lock.
+    if (session->finalizing.load(std::memory_order_acquire)) {
+      this->metrics_.lateResult(streamId);
+      if (auto* span = session->span.get()) span->addEvent("late_message");
+      return;
+    }
     std::shared_lock lifetimeLock(session->lifetimeMutex);
     const auto current = pending_.get(streamId);
-    if (!current || *current != cell) {
+    if (session->finalizing.load(std::memory_order_acquire) ||
+        !current || *current != cell) {
       this->metrics_.lateResult(streamId);
       return;
     }
@@ -205,9 +222,8 @@ class ClientStreamingEndpoint final : public Endpoint<T, R, Handler, E> {
         session->lifetimeMutex, std::defer_lock);
     try {
       session->done.Wait();
+      session->finalizing.store(true, std::memory_order_release);
       if (auto* traceSpan = session->span.get()) traceSpan->addEvent("done_received");
-      lifetimeLock.lock();
-      static_cast<void>(pending_.pop(streamId));
       std::optional<Res> response;
       try {
         response.emplace(session->rpc.Finish());
@@ -217,6 +233,10 @@ class ClientStreamingEndpoint final : public Endpoint<T, R, Handler, E> {
                          "close_and_recv.error");
         throw;
       }
+      // Done starts transport completion immediately. Only business response
+      // processing waits for already admitted ConsumeMessage calls to drain.
+      userver::engine::TaskCancellationBlocker cancellationBlocker;
+      lifetimeLock.lock();
       try {
         this->handler_.handleResponse(session->context, this->streamContext_,
                                       session->state, *response);
@@ -229,11 +249,13 @@ class ClientStreamingEndpoint final : public Endpoint<T, R, Handler, E> {
     } catch (...) {
       error = std::current_exception();
       this->traceError(session->span.get(), error);
-      if (!lifetimeLock.owns_lock()) lifetimeLock.lock();
-      static_cast<void>(pending_.pop(streamId));
     }
+    userver::engine::TaskCancellationBlocker cancellationBlocker;
+    session->finalizing.store(true, std::memory_order_release);
+    if (!lifetimeLock.owns_lock()) lifetimeLock.lock();
     this->callEnd(session->context, error, session->state);
     this->metrics_.requestEnd(session->startedAt, error);
+    static_cast<void>(pending_.pop(streamId));
   }
 
   ClientFunction client_;

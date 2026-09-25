@@ -430,3 +430,4 @@ UTEST(Operators, CallerSemanticsDispatchPreserveContextPriorityAndStatistics) {
 }
 
 #include "substream_test.hpp"
+#include "graph_parity_review_test.hpp"

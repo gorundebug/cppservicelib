@@ -22,6 +22,8 @@
 #include <servicelib/runtime/testmetrics/testmetrics.hpp>
 #include <servicelib/runtime/testtracing/testtracing.hpp>
 
+#include "test_callback_failure.hpp"
+
 namespace {
 
 using namespace std::chrono_literals;
@@ -209,6 +211,48 @@ UTEST(PriorityTaskPool, PriorityFifoAndDeadlinePromotion) {
                 .gauge("priority_task_pool.executors_busy", PriorityLabels())
                 .value(),
             0);
+}
+
+UTEST(PriorityTaskPool, UnhandledFailureTerminatesProcess) {
+  if (!std::getenv("SERVICELIB_FATAL_CALLBACK_CHILD")) {
+    GTEST_SKIP() << "Executed by the callback failure subprocess contract";
+  }
+  TestEnvironment environment;
+  servicelib::pool::PriorityTaskPoolImpl pool{kPoolName, environment};
+  pool.start(servicelib::Context{});
+  pool.addTask(servicelib::Context{}, 0, ThrowUnhandledCallbackFailure);
+  pool.stop(servicelib::Context{});
+  FAIL() << "unhandled callback exception did not terminate the process";
+}
+
+UTEST(DelayPool, UnhandledFailureTerminatesProcess) {
+  if (!std::getenv("SERVICELIB_FATAL_CALLBACK_CHILD")) {
+    GTEST_SKIP() << "Executed by the callback failure subprocess contract";
+  }
+  TestEnvironment environment;
+  servicelib::pool::DelayPoolImpl pool{environment};
+  pool.start(servicelib::Context{});
+  pool.delay(servicelib::Context{}, 0ms, ThrowUnhandledCallbackFailure);
+  pool.stop(servicelib::Context{});
+  FAIL() << "unhandled callback exception did not terminate the process";
+}
+
+UTEST(DelayPool, CoroutineCancellationReleasesPendingWork) {
+  TestEnvironment environment;
+  servicelib::pool::DelayPoolImpl pool{environment};
+  pool.start(servicelib::Context{});
+  std::atomic<bool> entered{false};
+  pool.delay(servicelib::Context{}, 0ms, [&] {
+    entered.store(true);
+    userver::engine::current_task::RequestCancel();
+    userver::engine::current_task::CancellationPoint();
+    ADD_FAILURE() << "CancellationPoint must unwind the callback";
+  });
+  pool.stop(servicelib::Context{}.withDeadline(
+      std::chrono::steady_clock::now() + 2s));
+  EXPECT_TRUE(entered.load());
+  EXPECT_EQ(environment.metrics().gauge("delay_pool.wait_queue_length", DelayLabels()).value(), 0);
+  EXPECT_EQ(environment.metrics().counter("delay_pool.events_total", DelayEventLabels("stop_timeout")).count(), 0);
 }
 
 UTEST(PriorityTaskPool, ExplicitCancellationPromotesOnlyOnce) {
