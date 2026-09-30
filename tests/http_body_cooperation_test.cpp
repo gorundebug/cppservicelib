@@ -1,16 +1,6 @@
-#include <userver/clients/http/client.hpp>
-#include <userver/clients/http/request.hpp>
-#include <userver/clients/http/response.hpp>
-#include <userver/engine/async.hpp>
-#include <userver/engine/single_consumer_event.hpp>
-#include <userver/utest/http_client.hpp>
-#include <userver/utest/utest.hpp>
-
 #include <arpa/inet.h>
-#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
-
 #include <chrono>
 #include <condition_variable>
 #include <exception>
@@ -19,6 +9,15 @@
 #include <string>
 #include <string_view>
 #include <thread>
+
+#include <userver/clients/http/client.hpp>
+#include <userver/clients/http/request.hpp>
+#include <userver/clients/http/response.hpp>
+#include <userver/engine/async.hpp>
+#include <userver/engine/single_consumer_event.hpp>
+#include <userver/utest/http_client.hpp>
+#include <userver/utest/utest.hpp>
+#include <poll.h>
 
 namespace {
 using namespace std::chrono_literals;

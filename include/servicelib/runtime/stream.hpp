@@ -54,7 +54,6 @@ class Stream : public StreamBase, public virtual StreamConsumer<_Tp> {
   // Named concrete operators are available to compile-time graph builders.
   // Their construction remains controlled by StreamExecutionEnvironment.
 #include <servicelib/operators/streamlink.inl>
-
 #include <servicelib/operators/case.inl>
 #include <servicelib/operators/delay.inl>
 #include <servicelib/operators/error.inl>

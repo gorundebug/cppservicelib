@@ -8,11 +8,13 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
-#include <servicelib/runtime/datasource.hpp>
-#include <servicelib/runtime/environment/tracing/tracing.hpp>
+
 #include <userver/engine/mutex.hpp>
 #include <userver/engine/shared_mutex.hpp>
 #include <userver/engine/single_use_event.hpp>
+
+#include <servicelib/runtime/datasource.hpp>
+#include <servicelib/runtime/environment/tracing/tracing.hpp>
 
 // Shared result state only; no endpoint or producer lifecycle lives here.
 namespace servicelib::datasource::localsource {

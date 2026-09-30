@@ -12,7 +12,6 @@
 #ifndef STREAMS_STREAMS_H
 #define STREAMS_STREAMS_H
 
-#include <assert.h>
 #include <any>
 #include <array>
 #include <atomic>
@@ -23,6 +22,8 @@
 #include <string>
 #include <unordered_set>
 #include <variant>
+
+#include <assert.h>
 // #include <cxxabi.h>
 
 namespace std {

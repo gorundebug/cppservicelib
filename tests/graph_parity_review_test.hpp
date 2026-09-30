@@ -1,10 +1,10 @@
 #pragma once
 
-#include "test_callback_failure.hpp"
-
 #include <array>
 #include <atomic>
 #include <string>
+
+#include "test_callback_failure.hpp"
 
 // Review instrumentation: local graph delivery must not invoke these methods.
 struct UserverReviewValue final {

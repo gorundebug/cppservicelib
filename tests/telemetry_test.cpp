@@ -6,8 +6,8 @@
 #include <vector>
 
 #include <userver/utest/utest.hpp>
-
 #include <userver/formats/yaml/serialize.hpp>
+
 #include <servicelib/runtime/base.hpp>
 #include <servicelib/runtime/caller.hpp>
 #include <servicelib/runtime/datasink.hpp>

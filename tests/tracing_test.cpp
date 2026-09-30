@@ -315,6 +315,7 @@ UTEST(Tracing, DetachedChildPreservesExplicitParentAndCanEndLater) {
 
 #include <array>
 #include <type_traits>
+
 #include <servicelib/runtime/caller.hpp>
 
 namespace {

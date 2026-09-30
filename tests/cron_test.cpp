@@ -7,10 +7,9 @@
  */
 
 #include <stdexcept>
+#include <atomic>
 
 #include <userver/utest/utest.hpp>
-
-#include <atomic>
 #include <userver/engine/async.hpp>
 
 #include <servicelib/datasource/cron/libcron.hpp>

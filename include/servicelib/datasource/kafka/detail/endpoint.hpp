@@ -1,6 +1,5 @@
 #pragma once
 
-#include <servicelib/runtime/stream_tracing.hpp>
 #include <atomic>
 #include <cstddef>
 #include <cstdlib>
@@ -23,6 +22,7 @@
 #include <userver/engine/single_use_event.hpp>
 #include <userver/utils/uuid7.hpp>
 
+#include <servicelib/runtime/stream_tracing.hpp>
 #include <servicelib/runtime/common.hpp>
 #include <servicelib/runtime/config/dataconnector_types.hpp>
 #include <servicelib/runtime/config/endpoint_types.hpp>
@@ -30,7 +30,6 @@
 #include <servicelib/runtime/environment/environment.hpp>
 #include <servicelib/runtime/environment/tracing/tracing.hpp>
 #include <servicelib/runtime/store/rotatingmap.hpp>
-
 #include <servicelib/datasource/detail/result_context.hpp>
 
 // Kafka owns its message lifecycle and pending correlations independently

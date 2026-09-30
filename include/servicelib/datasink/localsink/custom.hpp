@@ -1,7 +1,5 @@
 #pragma once
 
-#include <servicelib/runtime/stream_tracing.hpp>
-
 #include <exception>
 #include <functional>
 #include <optional>
@@ -9,6 +7,7 @@
 #include <string>
 #include <utility>
 
+#include <servicelib/runtime/stream_tracing.hpp>
 #include <servicelib/runtime/common.hpp>
 #include <servicelib/runtime/config/dataconnector_types.hpp>
 #include <servicelib/runtime/config/endpoint_types.hpp>

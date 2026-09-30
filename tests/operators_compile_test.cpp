@@ -1,8 +1,3 @@
-#include <gtest/gtest.h>
-
-#include <userver/engine/single_consumer_event.hpp>
-#include <userver/utest/utest.hpp>
-
 #include <chrono>
 #include <functional>
 #include <memory>
@@ -10,6 +5,10 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#include <gtest/gtest.h>
+#include <userver/engine/single_consumer_event.hpp>
+#include <userver/utest/utest.hpp>
 
 #include <servicelib/runtime/caller.hpp>
 #include <servicelib/runtime/testlog/testlog.hpp>

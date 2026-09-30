@@ -8,12 +8,11 @@
 #include <system_error>
 #include <thread>
 #include <utility>
-
 #include <netinet/in.h>
-#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <poll.h>
 #include <userver/engine/single_use_event.hpp>
 #include <userver/utest/http_client.hpp>
 #include <userver/utest/utest.hpp>

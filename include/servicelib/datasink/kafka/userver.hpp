@@ -1,7 +1,5 @@
 #pragma once
 
-#include <servicelib/runtime/stream_tracing.hpp>
-
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
@@ -26,6 +24,7 @@
 #include <userver/utils/statistics/storage.hpp>
 #include <userver/utils/statistics/writer.hpp>
 
+#include <servicelib/runtime/stream_tracing.hpp>
 #include <servicelib/runtime/common.hpp>
 #include <servicelib/runtime/config/dataconnector_types.hpp>
 #include <servicelib/runtime/config/endpoint_types.hpp>

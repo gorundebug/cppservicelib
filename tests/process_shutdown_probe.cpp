@@ -1,9 +1,9 @@
-#include <servicelib/runtime/process_shutdown.hpp>
-
 #include <chrono>
 #include <cstdio>
 #include <string_view>
 #include <thread>
+
+#include <servicelib/runtime/process_shutdown.hpp>
 
 namespace {
 using namespace std::chrono_literals;

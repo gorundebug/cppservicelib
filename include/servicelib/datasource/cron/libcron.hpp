@@ -18,12 +18,13 @@
 #include <unordered_map>
 #include <utility>
 
+#include <userver/engine/mutex.hpp>
+#include <userver/engine/single_consumer_event.hpp>
+
 #include <servicelib/runtime/context.hpp>
 #include <servicelib/runtime/environment/environment.hpp>
 #include <servicelib/runtime/payload.hpp>
 #include <servicelib/runtime/schedule.hpp>
-#include <userver/engine/mutex.hpp>
-#include <userver/engine/single_consumer_event.hpp>
 
 namespace servicelib {
 template <typename T, typename R, typename E, typename Context>

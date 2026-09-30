@@ -4,11 +4,10 @@
 #include <stop_token>
 #include <string>
 #include <thread>
-
-#include <userver/tracing/span.hpp>
 #include <utility>
 #include <vector>
 
+#include <userver/tracing/span.hpp>
 #include <userver/engine/async.hpp>
 #include <userver/engine/mutex.hpp>
 #include <userver/engine/single_consumer_event.hpp>

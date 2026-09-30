@@ -1,11 +1,11 @@
-#include "mockservice.hpp"
-
 #include <stdexcept>
 #include <utility>
 
 #include <userver/formats/json/serialize.hpp>
 #include <userver/formats/json/value_builder.hpp>
 #include <userver/testsuite/testpoint.hpp>
+
+#include "mockservice.hpp"
 
 namespace mockservice {
 

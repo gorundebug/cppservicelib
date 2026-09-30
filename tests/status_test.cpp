@@ -5,6 +5,7 @@
 
 #include <servicelib/runtime/status/status.hpp>
 #include <servicelib/runtime/telemetry/userver/status.hpp>
+
 #include "mockservice/config/config.hpp"
 
 UTEST(Status, BuildsLiveTopologyDataAndGraphYaml) {
