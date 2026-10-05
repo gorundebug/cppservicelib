@@ -27,8 +27,8 @@ constexpr userver::utils::TrivialBiMap kProgrammingLanguageMap = [](auto selecto
       .Case("CppUserver", ProgrammingLanguage::kCppUserver)
       .Case("Python", ProgrammingLanguage::kPython)
       .Case("Rust", ProgrammingLanguage::kRust)
-      .Case("CppBoost", ProgrammingLanguage::kCppBoost)
-      .Case("TypeScript", ProgrammingLanguage::kTypeScript);
+      .Case("TypeScript", ProgrammingLanguage::kTypeScript)
+      .Case("CppCoro", ProgrammingLanguage::kCppCoro);
 };
 
 inline ProgrammingLanguage Parse(const userver::formats::yaml::Value& value,

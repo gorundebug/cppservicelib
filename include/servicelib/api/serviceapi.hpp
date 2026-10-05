@@ -15,8 +15,8 @@ enum class ProgrammingLanguage {
   kCppUserver = 2,  // CppUserver
   kPython = 3,  // Python
   kRust = 4,  // Rust
-  kCppBoost = 5,  // CppBoost
   kTypeScript = 6,  // TypeScript
+  kCppCoro = 7,  // CppCoro
 };
 
 enum class JoinStorageType {

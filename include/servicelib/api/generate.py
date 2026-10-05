@@ -5,6 +5,7 @@ servicelib/api/serviceapi.yaml.
 Usage: python3 generate.py  (run from any directory)
 """
 
+import argparse
 import re
 import sys
 from pathlib import Path
@@ -15,7 +16,7 @@ except ImportError:
     print("pip install pyyaml", file=sys.stderr)
     sys.exit(1)
 
-SCRIPT_DIR = Path(__file__).parent
+SCRIPT_DIR = Path(__file__).resolve().parent
 SCHEMA_FILE = SCRIPT_DIR.parent.parent.parent.parent / "servicelib/api/serviceapi.yaml"
 OUT_FILE = SCRIPT_DIR / "serviceapi.hpp"
 OUT_PARSE_FILE = SCRIPT_DIR / "serviceapi_parse.hpp"
@@ -128,11 +129,15 @@ def generate_parse_block(name: str, schema: dict) -> str | None:
 
 
 def main() -> None:
-    if not SCHEMA_FILE.exists():
-        print(f"Schema file not found: {SCHEMA_FILE}", file=sys.stderr)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--schema", type=Path, default=SCHEMA_FILE)
+    parser.add_argument("--check", action="store_true")
+    args = parser.parse_args()
+    if not args.schema.exists():
+        print(f"Schema file not found: {args.schema}", file=sys.stderr)
         sys.exit(1)
 
-    data = yaml.safe_load(SCHEMA_FILE.read_text())
+    data = yaml.safe_load(args.schema.read_text())
     schemas = data.get("components", {}).get("schemas", {})
 
     enum_blocks = []
@@ -148,11 +153,20 @@ def main() -> None:
             if parse_block:
                 parse_blocks.append(parse_block)
 
-    OUT_FILE.write_text(HEADER + "\n\n".join(enum_blocks) + FOOTER)
-    print(f"Generated {OUT_FILE}")
-
-    OUT_PARSE_FILE.write_text(PARSE_HEADER + "\n\n".join(parse_blocks) + PARSE_FOOTER)
-    print(f"Generated {OUT_PARSE_FILE}")
+    outputs = {
+        OUT_FILE: HEADER + "\n\n".join(enum_blocks) + FOOTER,
+        OUT_PARSE_FILE: PARSE_HEADER + "\n\n".join(parse_blocks) + PARSE_FOOTER,
+    }
+    if args.check:
+        stale = [path for path, text in outputs.items()
+                 if not path.exists() or path.read_text() != text]
+        if stale:
+            print("Stale generated API: " + ", ".join(map(str, stale)), file=sys.stderr)
+            sys.exit(1)
+        return
+    for path, text in outputs.items():
+        path.write_text(text)
+        print(f"Generated {path}")
 
 
 if __name__ == "__main__":
