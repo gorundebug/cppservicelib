@@ -100,6 +100,29 @@ class CaseBase : protected T, public StreamConsumer<_Tp>, public StreamBase {
 
   static constexpr std::size_t size() { return std::tuple_size_v<T>; }
 
+  // Bind once after configuring all When nodes, before graph publication.
+  // Keep the returned index in the selector, not a per-message name lookup.
+  std::size_t whenIndex(std::string_view name) const {
+    if (name.empty()) throw StreamException("case branch name must not be empty");
+    std::size_t selected = size();
+    std::size_t index = 0;
+    auto visit = [&](const auto& branch) {
+      if (branch.getName() == name) {
+        if (selected != size()) {
+          throw StreamException("case branch '" + std::string(name) + "' is ambiguous");
+        }
+        selected = index;
+      }
+      ++index;
+    };
+    std::apply([&](const auto&... branch) { (visit(branch), ...); },
+               static_cast<const T&>(*this));
+    if (selected == size()) {
+      throw StreamException("case branch '" + std::string(name) + "' was not found");
+    }
+    return selected;
+  }
+
   size_t getId() const noexcept override { return StreamBase::getId(); }
 
   const std::string& getName() const noexcept override {

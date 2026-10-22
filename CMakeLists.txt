@@ -107,6 +107,8 @@ if(SERVICELIB_BUILD_TESTS)
       userver::kafka RdKafka::rdkafka)
   servicelib_add_test(servicelib_operators_test
       tests/operators_compile_test.cpp)
+  servicelib_add_test(servicelib_case_named_test
+      tests/case_named_test.cpp)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   find_package(Threads REQUIRED)
   add_executable(servicelib_process_shutdown_probe
