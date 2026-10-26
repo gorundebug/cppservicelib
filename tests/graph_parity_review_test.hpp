@@ -82,7 +82,7 @@ class GraphReviewEnvironment final
   using Base = servicelib::StreamExecutionEnvironment<GraphReviewEnvironment<Tag>, OperatorDataTypes>;
   explicit GraphReviewEnvironment(const GraphReviewConfig& config)
       : config_(std::make_shared<servicelib::config::RuntimeConfig>(config)) {}
-  ~GraphReviewEnvironment() { static_cast<void>(this->stopExecutionRuntime()); }
+  ~GraphReviewEnvironment() { static_cast<void>(this->stopExecutionRuntime(servicelib::Context{})); }
   std::shared_ptr<const servicelib::config::RuntimeConfig> getRuntimeConfigSnapshot() const override {
     return config_;
   }
@@ -166,7 +166,7 @@ UTEST_MT(GraphParityReview, MixedSplitMergeAndParallelDrainUseRealScheduler, 1) 
   EXPECT_EQ(observed, (std::vector<int>{12, 14, 11, 13, 22, 24, 21}));
   EXPECT_TRUE(entered[1].WaitForEventFor(userver::utest::kMaxTestWaitTime));
   auto stop = userver::utils::Async("graph-review-stop", [&] {
-    EXPECT_TRUE(environment.stopExecutionRuntime());
+    EXPECT_TRUE(environment.stopExecutionRuntime(servicelib::Context{}));
     stopped.store(true);
   });
   userver::engine::SleepFor(std::chrono::milliseconds(5));
@@ -214,7 +214,7 @@ void checkLocalGraphSerde(bool stub) {
   input->consume(MessageContext{}.withStreamId("local-payload"), Payload<Value>::make(std::move(value)));
   EXPECT_EQ(observed, 42);
   EXPECT_EQ(userverReviewSerdeCalls.load(), 0);
-  EXPECT_TRUE(environment.stopExecutionRuntime());
+  EXPECT_TRUE(environment.stopExecutionRuntime(servicelib::Context{}));
 }
 
 UTEST(GraphParityReview, LocalEdgesInheritOrResolveSerdeWithoutEncoding) {
@@ -235,7 +235,7 @@ UTEST(GraphParityReview, ParallelCoroutineCancellationDrainsActiveWork) {
     ADD_FAILURE() << "CancellationPoint must unwind the callback";
   });
   environment.parallel([&] { ++reached; });
-  EXPECT_TRUE(environment.stopExecutionRuntime());
+  EXPECT_TRUE(environment.stopExecutionRuntime(servicelib::Context{}));
   EXPECT_EQ(reached.load(), 2);
 }
 
@@ -247,7 +247,7 @@ UTEST(GraphParityReview, UnhandledFailureTerminatesProcess) {
   GraphReviewEnvironment<5> environment(config);
   environment.startExecutionRuntime();
   environment.parallel(ThrowUnhandledCallbackFailure);
-  static_cast<void>(environment.stopExecutionRuntime());
+  static_cast<void>(environment.stopExecutionRuntime(servicelib::Context{}));
   FAIL() << "unhandled callback exception did not terminate the process";
 }
 

@@ -90,6 +90,8 @@ if(SERVICELIB_BUILD_TESTS)
       tests/store_test.cpp)
   servicelib_add_test(servicelib_serviceapp_test
       tests/serviceapp_test.cpp)
+  servicelib_add_test(servicelib_context_graph_drain_test
+      tests/context_graph_drain_test.cpp)
   servicelib_add_test(servicelib_serde_test
       tests/serde_test.cpp)
   servicelib_add_test(servicelib_http_endpoints_test

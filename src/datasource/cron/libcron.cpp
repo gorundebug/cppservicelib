@@ -129,7 +129,8 @@ struct Endpoint::Impl final {
     return expression;
   }
 
-  void fire(const libcron::TaskInformation& information) {
+  void fire(const Context& owner, const libcron::TaskInformation& information) {
+    if (owner.cancelled()) return;
     const auto firedAt = Clock::now();
     const auto scheduledAt = firedAt - information.get_delay();
     std::size_t due = 1;
@@ -169,7 +170,7 @@ struct Endpoint::Impl final {
     try {
       tasks.CriticalAsyncDetach(
           "servicelib-cron-endpoint",
-          [this, scheduledAt, ownsRunning] {
+          [this, scheduledAt, ownsRunning, owner] {
             struct ActiveGuard final {
               userver::engine::Mutex& mutex;
               userver::engine::ConditionVariable& drained;
@@ -189,7 +190,7 @@ struct Endpoint::Impl final {
               }
             } guard{ownsRunning ? &running : nullptr};
             auto context = ApplyDataSourceEndpointTracing(
-                MessageContext{}.withStreamId(
+                detail::OccurrenceContext(owner).withStreamId(
                     userver::utils::generators::GenerateUuidV7()),
                 environment, endpointId);
             const std::string streamId{context.streamId()};
@@ -217,22 +218,14 @@ struct Endpoint::Impl final {
     }
   }
 
-  void stop(const Context& context) noexcept {
+  bool stop(const Context& context) {
     stopping.store(true, std::memory_order_release);
-    bool drainedBeforeDeadline = true;
-    {
-      std::unique_lock lock(activeMutex);
-      if (context.deadline()) {
-        drainedBeforeDeadline = drained.WaitUntil(
-            lock, *context.deadline(), [this] { return active == 0; });
-      } else {
-        static_cast<void>(drained.Wait(lock, [this] { return active == 0; }));
-      }
+    if (!detail::WaitForDrain(context, activeMutex, drained, active)) {
+      return false;
     }
-    if (drainedBeforeDeadline) {
-      tasks.CancelAndWait();
-    }
+    tasks.CancelAndWait();
     running.store(false, std::memory_order_release);
+    return true;
   }
 
   IServiceEnvironment& environment;
@@ -327,18 +320,21 @@ void LibcronDataSource::addEndpoint(std::shared_ptr<Endpoint> endpoint) {
 }
 
 void LibcronDataSource::start(Context context) {
-  static_cast<void>(context);
+  if (context.cancelled()) {
+    throw std::runtime_error("cron source context is cancelled or expired");
+  }
   if (impl_->started) {
     throw std::logic_error("cron data source is already started");
   }
+  impl_->started = true;
   try {
     for (const auto& endpoint : impl_->endpoints) {
       const auto expression = endpoint->impl_->configure();
       if (!expression) continue;
       if (!impl_->scheduler.add_schedule(
               endpoint->name(), *expression,
-              [endpoint](const libcron::TaskInformation& information) {
-                endpoint->impl_->fire(information);
+              [endpoint, context](const libcron::TaskInformation& information) {
+                endpoint->impl_->fire(context, information);
               })) {
         throw std::invalid_argument("invalid cron schedule for endpoint " +
                                     endpoint->name());
@@ -352,7 +348,11 @@ void LibcronDataSource::start(Context context) {
   } catch (...) {
     impl_->ticker.Stop();
     impl_->scheduler.clear_schedules();
-    for (const auto& endpoint : impl_->endpoints) endpoint->impl_->stop(context);
+    bool drained = true;
+    for (const auto& endpoint : impl_->endpoints) {
+      if (!endpoint->impl_->stop(context)) drained = false;
+    }
+    impl_->started = !drained;
     throw;
   }
 }
@@ -361,7 +361,13 @@ void LibcronDataSource::stop(Context context) {
   if (!impl_->started) return;
   impl_->ticker.Stop();
   impl_->scheduler.clear_schedules();
-  for (const auto& endpoint : impl_->endpoints) endpoint->impl_->stop(context);
+  bool drained = true;
+  for (const auto& endpoint : impl_->endpoints) {
+    if (!endpoint->impl_->stop(context)) drained = false;
+  }
+  if (!drained) {
+    throw std::runtime_error("cron data source still has active executions");
+  }
   impl_->started = false;
 }
 

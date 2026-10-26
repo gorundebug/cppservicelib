@@ -12,13 +12,18 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <stop_token>
+#include <vector>
 #include <string>
 #include <string_view>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
 
+#include <userver/engine/async.hpp>
 #include <userver/engine/mutex.hpp>
+#include <userver/engine/condition_variable.hpp>
 #include <userver/engine/single_consumer_event.hpp>
 
 #include <servicelib/runtime/context.hpp>
@@ -34,6 +39,65 @@ class InputStream;
 namespace servicelib::datasource::cron {
 
 namespace detail {
+
+inline MessageContext OccurrenceContext(const Context& owner) {
+  auto context = MessageContext{}.withStopToken(owner.stopToken())
+                     .withDeadline(owner.deadline())
+                     .withSampling(owner.samplingEnabled());
+  for (const auto& token : owner.externalStopTokens()) {
+    context = std::move(context).withExternalCancellation(token);
+  }
+  return context;
+}
+
+inline bool WaitForDrain(const Context& context,
+                         userver::engine::Mutex& mutex,
+                         userver::engine::ConditionVariable& drained,
+                         const std::size_t& active) {
+  {
+    std::unique_lock lock(mutex);
+    if (active == 0) return true;
+    if (context.cancelled()) return false;
+  }
+
+  // stop_callback may run on an ordinary thread. Only signal a thread-safe
+  // event there; acquire the coroutine mutex in a userver task instead.
+  userver::engine::SingleConsumerEvent cancellation;
+  using Callback = std::stop_callback<std::function<void()>>;
+  std::vector<std::unique_ptr<Callback>> callbacks;
+  callbacks.reserve(1 + context.externalStopTokens().size());
+  const auto subscribe = [&](std::stop_token token) {
+    if (token.stop_possible()) {
+      callbacks.push_back(std::make_unique<Callback>(token, [&cancellation] {
+        cancellation.Send();
+      }));
+    }
+  };
+  subscribe(context.stopToken());
+  for (const auto& token : context.externalStopTokens()) subscribe(token);
+  std::optional<userver::engine::TaskWithResult<void>> notifier;
+  if (!callbacks.empty()) {
+    notifier.emplace(userver::engine::AsyncNoTracing([&] {
+      if (cancellation.WaitForEvent()) {
+        std::lock_guard lock(mutex);
+        drained.NotifyAll();
+      }
+    }));
+  }
+
+  std::unique_lock lock(mutex);
+  const auto ready = [&] { return active == 0 || context.cancelled(); };
+  if (context.deadline()) {
+    static_cast<void>(drained.WaitUntil(lock, *context.deadline(), ready));
+  } else {
+    static_cast<void>(drained.Wait(lock, ready));
+  }
+  const bool completed = active == 0;
+  // Do not join the notifier while holding the mutex it may be acquiring.
+  lock.unlock();
+  if (notifier) notifier->SyncCancel();
+  return completed;
+}
 
 class ResultWaiter final {
  public:

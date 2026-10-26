@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -205,7 +206,7 @@ UTEST(ServiceLifecycle, RollsBackAlreadyStartedComponents) {
   EXPECT_THROW(lifecycle.start(servicelib::Context{}), std::runtime_error);
   EXPECT_EQ(
       events.snapshot(),
-      (std::vector<std::string>{"sink:start", "source:start", "sink:stop"}));
+      (std::vector<std::string>{"sink:start", "source:start", "source:stop", "sink:stop"}));
 }
 
 UTEST(ServiceLifecycle, StopFailureDoesNotSkipOtherResources) {
@@ -214,11 +215,12 @@ UTEST(ServiceLifecycle, StopFailureDoesNotSkipOtherResources) {
   servicelib::ServiceLifecycle lifecycle;
   lifecycle.add(servicelib::ServiceComponentKind::kComponent,
                 std::make_shared<Component>("healthy", &events));
-  lifecycle.add(servicelib::ServiceComponentKind::kComponent,
-                std::make_shared<Component>("failing", &events, false, true));
+  auto failing = std::make_shared<Component>("failing", &events, false, true);
+  lifecycle.add(servicelib::ServiceComponentKind::kComponent, failing);
 
   lifecycle.start(servicelib::Context{});
-  EXPECT_NO_THROW(lifecycle.stop(servicelib::Context{}, logger));
+  EXPECT_THROW(lifecycle.stop(servicelib::Context{}, logger), std::runtime_error);
+  EXPECT_FALSE(lifecycle.isStopped());
 
   const auto recorded = events.snapshot();
   EXPECT_NE(std::find(recorded.begin(), recorded.end(), "healthy:stop"),
@@ -230,6 +232,12 @@ UTEST(ServiceLifecycle, StopFailureDoesNotSkipOtherResources) {
             "service shutdown operation failed");
   EXPECT_EQ(logger.records.front().resource, "component:1");
   EXPECT_EQ(logger.records.front().error, "stop failed");
+  failing->failStop = false;
+  lifecycle.stop(servicelib::Context{}, logger);
+  EXPECT_TRUE(lifecycle.isStopped());
+  const auto retried = events.snapshot();
+  EXPECT_EQ(std::count(retried.begin(), retried.end(), "healthy:stop"), 1);
+  EXPECT_EQ(std::count(retried.begin(), retried.end(), "failing:stop"), 2);
 }
 
 UTEST(ServiceLifecycle, DeadlineIsUpperBoundForWholeShutdown) {
@@ -244,8 +252,9 @@ UTEST(ServiceLifecycle, DeadlineIsUpperBoundForWholeShutdown) {
 
   lifecycle.start(servicelib::Context{});
   const auto started = std::chrono::steady_clock::now();
-  lifecycle.stop(servicelib::Context{}.bounded(std::chrono::milliseconds{1}),
-                 logger);
+  EXPECT_THROW(lifecycle.stop(
+      servicelib::Context{}.bounded(std::chrono::milliseconds{1}), logger),
+      std::runtime_error);
 
   EXPECT_LT(std::chrono::steady_clock::now() - started,
             std::chrono::milliseconds{20});
@@ -256,6 +265,8 @@ UTEST(ServiceLifecycle, DeadlineIsUpperBoundForWholeShutdown) {
   EXPECT_EQ(logger.records.front().resource, "component:0");
   userver::engine::SleepFor(std::chrono::milliseconds{40});
   EXPECT_TRUE(stopped.load());
+  lifecycle.stop(servicelib::Context{}, logger);
+  EXPECT_TRUE(lifecycle.isStopped());
 }
 
 UTEST(ServiceLifecycle, DataConnectorTimeoutMatchesGoTelemetry) {
@@ -271,8 +282,9 @@ UTEST(ServiceLifecycle, DataConnectorTimeoutMatchesGoTelemetry) {
       &metrics, &logger);
 
   lifecycle.start(servicelib::Context{});
-  lifecycle.stop(servicelib::Context{}.bounded(std::chrono::milliseconds{1}),
-                 logger);
+  EXPECT_THROW(lifecycle.stop(
+      servicelib::Context{}.bounded(std::chrono::milliseconds{1}), logger),
+      std::runtime_error);
 
   EXPECT_FALSE(stopped.load());
   EXPECT_EQ(metrics
@@ -285,6 +297,8 @@ UTEST(ServiceLifecycle, DataConnectorTimeoutMatchesGoTelemetry) {
   EXPECT_EQ(entries.front().message, "data source stopped by timeout");
   userver::engine::SleepFor(std::chrono::milliseconds{40});
   EXPECT_TRUE(stopped.load());
+  lifecycle.stop(servicelib::Context{}, logger);
+  EXPECT_TRUE(lifecycle.isStopped());
 }
 
 UTEST(ServiceApp, PreparesConfiguredPoolsOnGraphLookup) {
@@ -304,13 +318,14 @@ UTEST(ServiceApp, StopWaitsForAcceptedInputInvocation) {
       std::make_shared<const servicelib::config::RuntimeConfig>(config));
   {
     Service service;
-    service.start();
+    const servicelib::Context context;
+    service.start(context);
     auto invocation = std::make_unique<
         decltype(service.beginInputInvocation())>(
         service.beginInputInvocation());
     std::atomic<bool> stopReturned{false};
     auto stopTask = userver::engine::AsyncNoTracing([&] {
-      service.stop();
+      service.stop(context);
       stopReturned.store(true, std::memory_order_release);
     });
 
@@ -327,4 +342,144 @@ UTEST(ServiceApp, StopWaitsForAcceptedInputInvocation) {
   servicelib::config::RuntimeConfigRegistry::Publish({});
 }
 
+}  // namespace
+
+namespace {
+struct HeldComponent final {
+  userver::engine::SingleConsumerEvent entered, release;
+  std::atomic<int> calls{0};
+  std::optional<servicelib::Context> stopContext;
+  bool failStart{};
+  void start(servicelib::Context) {
+    if (failStart) throw std::runtime_error("original startup failure");
+  }
+  void stop(servicelib::Context context) {
+    stopContext = context;
+    ++calls;
+    entered.Send();
+    EXPECT_TRUE(release.WaitForEventFor(userver::utest::kMaxTestWaitTime));
+  }
+};
+
+UTEST(ServiceLifecycle, IncompleteSourceKeepsSinkAndReusesStopOperation) {
+  EventLog events;
+  auto source = std::make_shared<HeldComponent>();
+  servicelib::ServiceLifecycle lifecycle;
+  lifecycle.add(servicelib::ServiceComponentKind::kDataSource, source);
+  lifecycle.add(servicelib::ServiceComponentKind::kDataSink,
+                std::make_shared<Component>("sink", &events));
+  lifecycle.start(servicelib::Context{});
+  EXPECT_THROW(lifecycle.stop(servicelib::Context{}.bounded(
+      std::chrono::milliseconds{5})), std::runtime_error);
+  EXPECT_EQ(source->calls.load(), 1);
+  EXPECT_FALSE(lifecycle.isStopped());
+  EXPECT_EQ(events.snapshot(), (std::vector<std::string>{"sink:start"}));
+  EXPECT_THROW(lifecycle.stopAfterGraphDrain(servicelib::Context{}), std::logic_error);
+  source->release.Send();
+  lifecycle.stop(servicelib::Context{});
+  EXPECT_TRUE(lifecycle.isStopped());
+  EXPECT_EQ(source->calls.load(), 1);
+  EXPECT_TRUE(source->stopContext->deadline().has_value());
+  EXPECT_EQ(events.snapshot(), (std::vector<std::string>{"sink:start", "sink:stop"}));
+}
+
+UTEST(ServiceLifecycle, ConcurrentCallerCancellationDoesNotCancelOwnerStop) {
+  auto source = std::make_shared<HeldComponent>();
+  servicelib::ServiceLifecycle lifecycle;
+  lifecycle.add(servicelib::ServiceComponentKind::kDataSource, source);
+  lifecycle.start(servicelib::Context{});
+  auto owner = userver::engine::AsyncNoTracing([&] {
+    lifecycle.stop(servicelib::Context{});
+  });
+  EXPECT_TRUE(source->entered.WaitForEventFor(userver::utest::kMaxTestWaitTime));
+  std::stop_source cancellation;
+  auto other = userver::engine::AsyncNoTracing([&] {
+    lifecycle.stop(servicelib::Context{}.withExternalCancellation(cancellation.get_token()));
+  });
+  std::thread cancel([&] { cancellation.request_stop(); });
+  cancel.join();
+  EXPECT_THROW(other.Get(), std::runtime_error);
+  EXPECT_FALSE(owner.IsFinished());
+  EXPECT_EQ(source->calls.load(), 1);
+  source->release.Send();
+  owner.Get();
+  EXPECT_TRUE(lifecycle.isStopped());
+}
+
+UTEST(ServiceLifecycle, StartupRollbackRetainsPartialSourceAndDependencies) {
+  EventLog events;
+  auto source = std::make_shared<HeldComponent>();
+  source->failStart = true;
+  servicelib::ServiceLifecycle lifecycle;
+  lifecycle.add(servicelib::ServiceComponentKind::kDataSource, source);
+  lifecycle.add(servicelib::ServiceComponentKind::kDataSink,
+                std::make_shared<Component>("sink", &events));
+  try {
+    lifecycle.start(servicelib::Context{}.bounded(std::chrono::milliseconds{5}));
+    ADD_FAILURE() << "startup must fail";
+  } catch (const std::runtime_error& error) {
+    EXPECT_STREQ(error.what(), "original startup failure");
+  }
+  EXPECT_FALSE(lifecycle.isStopped());
+  EXPECT_EQ(events.snapshot(), (std::vector<std::string>{"sink:start"}));
+  EXPECT_EQ(source->calls.load(), 1);
+  source->release.Send();
+  lifecycle.stop(servicelib::Context{});
+  EXPECT_TRUE(lifecycle.isStopped());
+  EXPECT_EQ(source->calls.load(), 1);
+  EXPECT_EQ(events.snapshot(), (std::vector<std::string>{"sink:start", "sink:stop"}));
+}
+
+template <int Tag>
+class RetainedService final
+    : public servicelib::ServiceApp<RetainedService<Tag>, ServiceDataTypes> {};
+
+UTEST(ServiceApp, GraphTimeoutRetainsSinkUntilRetry) {
+  PriorityPoolConfig config;
+  servicelib::config::RuntimeConfigRegistry::Publish(
+      std::make_shared<const servicelib::config::RuntimeConfig>(config));
+  {
+    EventLog events;
+    RetainedService<1> service;
+    service.registerDataSink(std::make_shared<Component>("sink", &events));
+    service.start(servicelib::Context{});
+    auto invocation = std::make_unique<decltype(service.beginInputInvocation())>(
+        service.beginInputInvocation());
+    EXPECT_THROW(service.stop(servicelib::Context{}.bounded(
+        std::chrono::milliseconds{5})), std::runtime_error);
+    EXPECT_FALSE(service.isStopped());
+    EXPECT_FALSE(service.isRunning());
+    EXPECT_EQ(events.snapshot(), (std::vector<std::string>{"sink:start"}));
+    EXPECT_THROW(service.start(servicelib::Context{}), std::logic_error);
+    invocation.reset();
+    service.stop(servicelib::Context{});
+    EXPECT_TRUE(service.isStopped());
+    EXPECT_EQ(events.snapshot(), (std::vector<std::string>{"sink:start", "sink:stop"}));
+  }
+  servicelib::config::RuntimeConfigRegistry::Publish({});
+}
+
+UTEST(ServiceApp, SourceFailureRetainsSinkForExplicitRetry) {
+  PriorityPoolConfig config;
+  servicelib::config::RuntimeConfigRegistry::Publish(
+      std::make_shared<const servicelib::config::RuntimeConfig>(config));
+  {
+    EventLog events;
+    RetainedService<2> service;
+    auto source = std::make_shared<Component>("source", &events, false, true);
+    service.registerDataSource(source);
+    service.registerDataSink(std::make_shared<Component>("sink", &events));
+    service.start(servicelib::Context{});
+    EXPECT_THROW(service.stop(servicelib::Context{}), std::runtime_error);
+    EXPECT_FALSE(service.isStopped());
+    const auto pending = events.snapshot();
+    EXPECT_EQ(std::count(pending.begin(), pending.end(), "sink:stop"), 0);
+    source->failStop = false;
+    service.stop(servicelib::Context{});
+    EXPECT_TRUE(service.isStopped());
+    const auto done = events.snapshot();
+    EXPECT_EQ(std::count(done.begin(), done.end(), "sink:stop"), 1);
+  }
+  servicelib::config::RuntimeConfigRegistry::Publish({});
+}
 }  // namespace

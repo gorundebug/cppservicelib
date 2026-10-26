@@ -18,10 +18,13 @@
 #include <userver/engine/async.hpp>
 #include <userver/engine/condition_variable.hpp>
 #include <userver/engine/mutex.hpp>
+#include <userver/engine/single_consumer_event.hpp>
 #include <userver/engine/task/task.hpp>
+#include <userver/engine/task/task_with_result.hpp>
 #include <userver/utils/fast_scope_guard.hpp>
 
 #include <servicelib/runtime/caller.hpp>
+#include <servicelib/runtime/detail/context_wait.hpp>
 #include <servicelib/runtime/status/status.hpp>
 
 namespace servicelib {
@@ -312,27 +315,18 @@ class StreamExecutionEnvironment : public NotCopyableOrMovable,
     }
   }
 
-  bool drainExecutionRuntime(Context context = {}) noexcept {
+  bool drainExecutionRuntime(Context context) {
     if (!activeRuntime_) return true;
     inputInvocations_.fetch_or(kInputInvocationClosed,
                                std::memory_order_acq_rel);
-    bool drained = true;
-    {
-      userver::engine::TaskCancellationBlocker cancellationBlocker;
-      std::unique_lock<userver::engine::Mutex> lock(parallelMutex_);
-      const auto isDrained = [this] {
-        return (inputInvocations_.load(std::memory_order_acquire) &
-                kInputInvocationCountMask) == 0 &&
-               parallelActive_ == 0;
-      };
-      if (context.deadline()) {
-        drained = parallelDrained_.WaitUntil(lock, *context.deadline(),
-                                             isDrained);
-      } else {
-        static_cast<void>(parallelDrained_.Wait(lock, isDrained));
-      }
-      parallelAccepting_ = false;
-    }
+    userver::engine::TaskCancellationBlocker cancellationBlocker;
+    std::unique_lock<userver::engine::Mutex> lock(parallelMutex_);
+    const bool drained = detail::WaitWithContext(
+        parallelDrained_, lock, context, [this] {
+          return (inputInvocations_.load(std::memory_order_acquire) &
+                  kInputInvocationCountMask) == 0 && parallelActive_ == 0;
+        });
+    if (drained) parallelAccepting_ = false;
     return drained;
   }
 
@@ -345,9 +339,8 @@ class StreamExecutionEnvironment : public NotCopyableOrMovable,
 
   void abandonExecutionRuntime() noexcept { activeRuntime_ = nullptr; }
 
-  bool stopExecutionRuntime(Context context = {}) noexcept {
+  bool stopExecutionRuntime(Context context) {
     if (!drainExecutionRuntime(std::move(context))) {
-      abandonExecutionRuntime();
       return false;
     }
     releaseExecutionRuntime();

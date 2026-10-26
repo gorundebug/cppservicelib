@@ -5,6 +5,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <exception>
 #include <functional>
@@ -24,6 +25,7 @@
 #include <userver/engine/wait_all_checked.hpp>
 
 #include <servicelib/runtime/context.hpp>
+#include <servicelib/runtime/detail/context_wait.hpp>
 #include <servicelib/runtime/environment.hpp>
 #include <servicelib/runtime/pool/delaypool.hpp>
 #include <servicelib/runtime/pool/prioritytaskpool.hpp>
@@ -84,6 +86,7 @@ class ServiceLifecycle final {
   }
 
   void start(Context context) {
+    const auto transition = transition_.acquire(context);
     if (state_ != State::kCreated) {
       throw std::logic_error("service lifecycle is already started");
     }
@@ -92,15 +95,21 @@ class ServiceLifecycle final {
     try {
       for (const auto kind : kStartOrder) {
         for (auto& entry : entries_[index(kind)]) {
-          entry.start(context);
+          entry.started = true;
           started_.push_back(&entry);
+          entry.start(context);
         }
       }
       state_ = State::kRunning;
     } catch (...) {
       const auto error = std::current_exception();
-      stopStarted(context);
-      state_ = State::kStopped;
+      state_ = State::kStopping;
+      rollbackPending_ = true;
+      try {
+        stopStarted(context);
+      } catch (...) {
+        // Keep the original startup error and all incomplete cleanup state.
+      }
       std::rethrow_exception(error);
     }
   }
@@ -113,13 +122,19 @@ class ServiceLifecycle final {
 
   void stopBeforeGraphDrain(
       Context context, log::Logger& logger = log::NoopLogger::instance()) {
+    const auto transition = transition_.acquire(context);
     if (state_ == State::kCreated) {
       state_ = State::kStopped;
       clear();
       return;
     }
     if (state_ == State::kStopped) return;
-    if (state_ != State::kRunning) {
+    if (rollbackPending_) {
+      stopStarted(context);
+      return;
+    }
+    if (beforeGraphDrained_) return;
+    if (state_ != State::kRunning && state_ != State::kStopping) {
       throw std::logic_error("service lifecycle transition is in progress");
     }
 
@@ -147,12 +162,14 @@ class ServiceLifecycle final {
                   entries_[index(ServiceComponentKind::kDelayPool)]);
     appendReverse(executors, entries_[index(ServiceComponentKind::kStorage)]);
     stopPhase(context, logger, executors);
+    beforeGraphDrained_ = true;
   }
 
   void stopAfterGraphDrain(
       Context context, log::Logger& logger = log::NoopLogger::instance()) {
+    const auto transition = transition_.acquire(context);
     if (state_ == State::kStopped) return;
-    if (state_ != State::kStopping) {
+    if (state_ != State::kStopping || !beforeGraphDrained_) {
       throw std::logic_error(
           "service lifecycle graph drain phase has not started");
     }
@@ -164,8 +181,18 @@ class ServiceLifecycle final {
     clear();
   }
 
+  bool isStopped() const noexcept { return state_ == State::kStopped; }
+
  private:
   enum class State { kCreated, kStarting, kRunning, kStopping, kStopped };
+
+  struct StopOperation final {
+    userver::engine::Mutex mutex;
+    userver::engine::ConditionVariable changed;
+    bool done{};
+    std::exception_ptr error;
+    userver::engine::TaskWithResult<void> task;
+  };
 
   struct Entry final {
     std::string name;
@@ -174,6 +201,8 @@ class ServiceLifecycle final {
     std::function<void(Context)> start;
     std::function<void(Context)> stop;
     std::function<void()> onStopTimeout;
+    bool started{};
+    std::shared_ptr<StopOperation> stopping{};
   };
 
   static constexpr std::size_t index(ServiceComponentKind kind) noexcept {
@@ -293,80 +322,67 @@ class ServiceLifecycle final {
 
   static void stopPhase(Context context, log::Logger& logger,
                         const std::vector<Entry*>& entries) {
-    if (entries.empty()) return;
-
-    userver::engine::TaskCancellationBlocker cancellationBlocker;
-    std::vector<userver::engine::TaskWithResult<std::exception_ptr>> tasks;
-    tasks.reserve(entries.size());
+    userver::engine::TaskCancellationBlocker blocker;
     for (auto* entry : entries) {
+      if (!entry->started || entry->stopping) continue;
+      auto operation = std::make_shared<StopOperation>();
       auto stop = entry->stop;
       auto owner = entry->owner;
-      tasks.push_back(userver::engine::AsyncNoTracing(
-          [stop = std::move(stop), owner = std::move(owner),
-           context]() mutable -> std::exception_ptr {
+      operation->task = userver::engine::AsyncNoTracing(
+          [operation, stop = std::move(stop), owner = std::move(owner), context] {
             static_cast<void>(owner);
-            try {
-              stop(std::move(context));
-              return {};
-            } catch (...) {
-              return std::current_exception();
-            }
-          }));
+            std::exception_ptr error;
+            try { stop(context); } catch (...) { error = std::current_exception(); }
+            userver::engine::TaskCancellationBlocker completionBlocker;
+            std::unique_lock<userver::engine::Mutex> lock(operation->mutex);
+            operation->error = error;
+            operation->done = true;
+            operation->changed.NotifyAll();
+          });
+      entry->stopping = std::move(operation);
     }
 
-    userver::engine::FutureStatus status =
-        userver::engine::FutureStatus::kReady;
-    if (context.deadline()) {
-      status = userver::engine::WaitAllCheckedUntil(
-          userver::engine::Deadline::FromTimePoint(*context.deadline()), tasks);
-    } else {
-      userver::engine::WaitAllChecked(tasks);
-    }
-
-    if (status != userver::engine::FutureStatus::kReady) {
-      for (std::size_t i = 0; i < tasks.size(); ++i) {
-        if (!tasks[i].IsFinished()) {
-          if (entries[i]->onStopTimeout) {
-            entries[i]->onStopTimeout();
-          } else {
-            logFailure(logger, "service shutdown operation timed out",
-                       *entries[i]);
-          }
-        }
-      }
-    }
-
-    for (std::size_t i = 0; i < tasks.size(); ++i) {
-      if (!tasks[i].IsFinished()) {
-        // The service-wide shutdown deadline is an upper bound, not a
-        // diagnostic followed by an unbounded join. The task owns both the
-        // stop callable and its component until it completes, so detaching it
-        // cannot observe the cleared lifecycle registry.
-        userver::engine::DetachUnscopedUnsafe(
-            std::move(tasks[i]).AsTask());
+    std::exception_ptr failure;
+    for (auto* entry : entries) {
+      if (!entry->started) continue;
+      const auto operation = entry->stopping;
+      std::unique_lock<userver::engine::Mutex> lock(operation->mutex);
+      if (!detail::WaitWithContext(operation->changed, lock, context,
+                                   [&] { return operation->done; })) {
+        if (entry->onStopTimeout) entry->onStopTimeout();
+        else logFailure(logger, "service shutdown operation timed out", *entry);
+        if (!failure) failure = std::make_exception_ptr(
+            std::runtime_error("service shutdown operation cancelled or expired: " + entry->name));
         continue;
       }
-      const auto error = tasks[i].Get();
-      if (!error) continue;
+      const auto error = operation->error;
+      lock.unlock();
+      operation->task.Get();
+      entry->stopping.reset();
+      if (!error) {
+        entry->started = false;
+        continue;
+      }
+      if (!failure) failure = error;
       try {
         std::rethrow_exception(error);
       } catch (const std::exception& ex) {
-        logFailure(logger, "service shutdown operation failed", *entries[i],
-                   ex.what());
+        logFailure(logger, "service shutdown operation failed", *entry, ex.what());
       } catch (...) {
-        logFailure(logger, "service shutdown operation failed", *entries[i],
-                   "unknown exception");
+        logFailure(logger, "service shutdown operation failed", *entry, "unknown exception");
       }
     }
+    if (failure) std::rethrow_exception(failure);
   }
 
-  void stopStarted(Context context) noexcept {
+  void stopStarted(Context context) {
+    // Roll back in reverse start order. If an owner is still active, its
+    // dependencies must remain alive for the next cleanup attempt.
     for (auto it = started_.rbegin(); it != started_.rend(); ++it) {
-      try {
-        (*it)->stop(context);
-      } catch (...) {
-      }
+      stopPhase(context, log::NoopLogger::instance(), {*it});
     }
+    rollbackPending_ = false;
+    state_ = State::kStopped;
     clear();
   }
 
@@ -396,7 +412,10 @@ class ServiceLifecycle final {
              static_cast<std::size_t>(ServiceComponentKind::kCount)>
       entries_;
   std::vector<Entry*> started_;
-  State state_{State::kCreated};
+  detail::ContextGate transition_;
+  std::atomic<State> state_{State::kCreated};
+  bool rollbackPending_{};
+  bool beforeGraphDrained_{};
 };
 
 // The stream execution environment contains only graph/runtime mechanics.
@@ -477,63 +496,53 @@ class ServiceApp
     lifecycle_.add(ServiceComponentKind::kComponent, std::move(component));
   }
 
-  void start(Context context = {}) {
-    if (running_) throw std::logic_error("service is already started");
-
-    ensureConfiguredPools();
-    this->startExecutionRuntime();
+  void start(Context context) {
+    const auto transition = transition_.acquire(context);
+    if (lifecyclePending_) throw std::logic_error("service lifecycle is already active");
+    lifecyclePending_ = true;
     try {
+      ensureConfiguredPools();
+      this->startExecutionRuntime();
       status::Registry::Register(*this);
-      lifecycle_.start(std::move(context));
+      lifecycle_.start(context);
       running_ = true;
     } catch (...) {
+      const auto error = std::current_exception();
       status::Registry::Unregister(*this);
-      this->stopExecutionRuntime();
-      releaseOwnedRuntimeObjects();
-      throw;
+      try {
+        lifecycle_.stop(context, this->getLogger());
+        if (this->stopExecutionRuntime(context)) {
+          releaseOwnedRuntimeObjects();
+          lifecyclePending_ = false;
+        }
+      } catch (...) {
+        // Retain incomplete cleanup and preserve the original start error.
+      }
+      std::rethrow_exception(error);
     }
   }
 
-  void stop(Context context = {}) {
-    if (!running_) return;
+  void stop(Context context) {
+    if (const auto service = this->getServiceConfigSnapshot();
+        service && service->shutdownTimeout > 0) {
+      context = context.bounded(std::chrono::milliseconds{service->shutdownTimeout});
+    }
+    const auto transition = transition_.acquire(context);
+    if (!lifecyclePending_) return;
     running_ = false;
     status::Registry::Unregister(*this);
-
-    std::exception_ptr lifecycleError;
-    try {
-      if (const auto service = this->getServiceConfigSnapshot();
-          service && service->shutdownTimeout > 0) {
-        context = context.bounded(
-            std::chrono::milliseconds{service->shutdownTimeout});
-      }
-      lifecycle_.stopBeforeGraphDrain(context, this->getLogger());
-    } catch (...) {
-      lifecycleError = std::current_exception();
+    lifecycle_.stopBeforeGraphDrain(context, this->getLogger());
+    if (!this->drainExecutionRuntime(context)) {
+      throw std::runtime_error("service graph shutdown cancelled or expired");
     }
-    const bool graphDrained = this->drainExecutionRuntime(context);
-    if (!graphDrained) {
-      try {
-        this->getLogger().warn("service graph drain timed out");
-      } catch (...) {
-      }
-    }
-    try {
-      lifecycle_.stopAfterGraphDrain(context, this->getLogger());
-    } catch (...) {
-      if (!lifecycleError) lifecycleError = std::current_exception();
-    }
-    if (graphDrained) {
-      this->releaseExecutionRuntime();
-    } else {
-      // In-flight work still owns graph callbacks. Preserve their targets
-      // after the service-wide shutdown deadline instead of freeing them.
-      this->abandonExecutionRuntime();
-    }
+    lifecycle_.stopAfterGraphDrain(context, this->getLogger());
+    this->releaseExecutionRuntime();
     releaseOwnedRuntimeObjects();
-    if (lifecycleError) std::rethrow_exception(lifecycleError);
+    lifecyclePending_ = false;
   }
 
-  bool isRunning() const noexcept { return running_; }
+  bool isRunning() const noexcept { return running_.load(); }
+  bool isStopped() const noexcept { return !lifecyclePending_.load(); }
 
   std::string networkDataJson() const override {
     return this->makeStatusNetworkDataJson();
@@ -606,7 +615,9 @@ class ServiceApp
   std::unordered_map<std::string, std::shared_ptr<pool::ITaskPool>> taskPools_;
   std::unordered_map<std::string, std::shared_ptr<pool::IPriorityTaskPool>>
       priorityTaskPools_;
-  bool running_{false};
+  detail::ContextGate transition_;
+  std::atomic<bool> running_{false};
+  std::atomic<bool> lifecyclePending_{false};
 };
 
 }  // namespace servicelib
