@@ -181,10 +181,11 @@ class ProducerAdapter final {
   ProducerAdapter(ConsumerClient& client, IServiceEnvironment& environment)
       : client_(client), tracingEnabled_(environment.getTracing() != nullptr) {}
 
-  void start(Context, Consumer consumer) {
-    client_.start([tracingEnabled = tracingEnabled_, consumer = std::move(consumer)](ConsumerMessage message) {
+  void start(Context owner, Consumer consumer) {
+    client_.start([owner = std::move(owner), tracingEnabled = tracingEnabled_,
+                   consumer = std::move(consumer)](ConsumerMessage message) {
       auto context = servicelib::detail::ContextFromKafkaHeaders(
-          message.headers(), tracingEnabled);
+          MessageContext{owner}, message.headers(), tracingEnabled);
       consumer(std::move(context),
                Payload<ConsumerMessage>::make(std::move(message)));
     });
@@ -204,6 +205,10 @@ class HandlerAdapter final {
 
   int concurrency(SourceStreamContext<T, R, E>& context) {
     return handler_.concurrency(context);
+  }
+  void onError(MessageContext context, SourceStreamContext<T, R, E>& stream,
+               std::exception_ptr error) {
+    handler_.onError(std::move(context), stream, std::move(error));
   }
   BeginResult<State> beginRequest(MessageContext context,
                                   SourceStreamContext<T, R, E>& stream) {

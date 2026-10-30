@@ -7,6 +7,7 @@
  */
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <exception>
 #include <mutex>
@@ -25,6 +26,7 @@
 #include <userver/utils/uuid7.hpp>
 
 #include <servicelib/datasource/cron/libcron.hpp>
+#include <servicelib/datasource/cron/local_interval.hpp>
 #include <servicelib/runtime/config/dataconnector_types.hpp>
 #include <servicelib/runtime/config/endpoint_types.hpp>
 #include <servicelib/runtime/datasource.hpp>
@@ -111,20 +113,28 @@ struct Endpoint::Impl final {
 
   std::optional<std::string> configure() {
     const auto cfg = EndpointConfig(environment, endpointId);
+    interval.reset();
+    evaluator.reset();
     if (!cfg.enabled) return std::nullopt;
     if (cfg.timezone != "UTC") {
       throw std::invalid_argument("scheduled endpoint timezone must be UTC");
     }
     overlapPolicy = cfg.overlapPolicy;
     missedRunPolicy = cfg.missedRunPolicy;
-    const auto expression = ToLibcronExpression(cfg.schedule);
-    auto cronData = libcron::CronData::create(expression);
-    if (!cronData.is_valid()) {
-      throw std::invalid_argument("invalid cron schedule for endpoint " +
-                                  endpointName);
+    std::string expression;
+    if (const auto period = detail::ParseLocalInterval(cfg.schedule)) {
+      interval.emplace(*period, Clock::now());
+    } else {
+      expression = ToLibcronExpression(cfg.schedule);
+      auto cronData = libcron::CronData::create(expression);
+      if (!cronData.is_valid()) {
+        throw std::invalid_argument("invalid cron schedule for endpoint " +
+                                    endpointName);
+      }
+      evaluator.emplace(cronData);
     }
-    evaluator.emplace(cronData);
     lastScheduled.reset();
+    tasks.emplace();
     stopping.store(false, std::memory_order_release);
     return expression;
   }
@@ -144,7 +154,20 @@ struct Endpoint::Impl final {
       }
     }
     lastScheduled = scheduledAt;
-    if (due > 1 &&
+    dispatch(owner, scheduledAt, due > 1);
+  }
+
+  void fireInterval(const Context& owner, Clock::time_point now) {
+    if (!interval || owner.cancelled()) return;
+    if (const auto due = interval->takeDue(now)) {
+      dispatch(owner, due->scheduledAt, due->missed);
+    }
+  }
+
+  void dispatch(const Context& owner, Clock::time_point scheduledAt,
+                bool missed) {
+    if (owner.cancelled()) return;
+    if (missed &&
         missedRunPolicy == api::ScheduleMissedRunPolicy::kSkip) {
       return;
     }
@@ -168,7 +191,7 @@ struct Endpoint::Impl final {
       ++active;
     }
     try {
-      tasks.CriticalAsyncDetach(
+      tasks->CriticalAsyncDetach(
           "servicelib-cron-endpoint",
           [this, scheduledAt, ownsRunning, owner] {
             struct ActiveGuard final {
@@ -223,7 +246,10 @@ struct Endpoint::Impl final {
     if (!detail::WaitForDrain(context, activeMutex, drained, active)) {
       return false;
     }
-    tasks.CancelAndWait();
+    if (tasks) {
+      tasks->CancelAndWait();
+      tasks.reset();
+    }
     running.store(false, std::memory_order_release);
     return true;
   }
@@ -239,13 +265,16 @@ struct Endpoint::Impl final {
   api::ScheduleMissedRunPolicy missedRunPolicy{
       api::ScheduleMissedRunPolicy::kSkip};
   std::optional<libcron::CronSchedule> evaluator;
+  std::optional<detail::LocalInterval> interval;
   std::optional<Clock::time_point> lastScheduled;
   std::atomic<bool> running{false};
   std::atomic<bool> stopping{true};
   userver::engine::Mutex activeMutex;
   userver::engine::ConditionVariable drained;
   std::size_t active{};
-  userver::concurrent::BackgroundTaskStorage tasks;
+  // CancelAndWait closes the storage permanently. A later start owns a new
+  // storage; a timed-out stop retains this one until accepted work drains.
+  std::optional<userver::concurrent::BackgroundTaskStorage> tasks;
 };
 
 Endpoint::Endpoint(IServiceEnvironment& environment, int endpointId,
@@ -331,6 +360,7 @@ void LibcronDataSource::start(Context context) {
     for (const auto& endpoint : impl_->endpoints) {
       const auto expression = endpoint->impl_->configure();
       if (!expression) continue;
+      if (endpoint->impl_->interval) continue;
       if (!impl_->scheduler.add_schedule(
               endpoint->name(), *expression,
               [endpoint, context](const libcron::TaskInformation& information) {
@@ -340,10 +370,23 @@ void LibcronDataSource::start(Context context) {
                                     endpoint->name());
       }
     }
-    userver::utils::PeriodicTask::Settings settings{
-        std::chrono::milliseconds{500}};
+    auto pollingPeriod = std::chrono::milliseconds{500};
+    for (const auto& endpoint : impl_->endpoints) {
+      if (endpoint->impl_->interval) {
+        pollingPeriod = std::min(
+            pollingPeriod, endpoint->impl_->interval->period() / 2);
+      }
+    }
+    userver::utils::PeriodicTask::Settings settings{pollingPeriod};
     impl_->ticker.Start(impl_->connectorName + "-cron", settings,
-                        [this] { impl_->scheduler.tick(); });
+                        [this, context] {
+                          if (context.cancelled()) return;
+                          impl_->scheduler.tick();
+                          const auto now = Clock::now();
+                          for (const auto& endpoint : impl_->endpoints) {
+                            endpoint->impl_->fireInterval(context, now);
+                          }
+                        });
     impl_->started = true;
   } catch (...) {
     impl_->ticker.Stop();

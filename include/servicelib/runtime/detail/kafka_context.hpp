@@ -10,9 +10,9 @@ namespace servicelib::detail {
 
 using KafkaHeaders = std::map<std::string, std::string>;
 
-inline MessageContext ContextFromKafkaHeaders(const KafkaHeaders& headers,
+inline MessageContext ContextFromKafkaHeaders(MessageContext context,
+                                              const KafkaHeaders& headers,
                                               bool tracingEnabled = true) {
-  MessageContext context;
   if (const auto found = headers.find("x-stream-id");
       found != headers.end() && !found->second.empty()) {
     context = std::move(context).withStreamId(found->second);
@@ -43,6 +43,11 @@ inline MessageContext ContextFromKafkaHeaders(const KafkaHeaders& headers,
     context = std::move(context).withSampling(true);
   }
   return context;
+}
+
+inline MessageContext ContextFromKafkaHeaders(const KafkaHeaders& headers,
+                                              bool tracingEnabled = true) {
+  return ContextFromKafkaHeaders(MessageContext{}, headers, tracingEnabled);
 }
 
 inline void InjectKafkaContext(const MessageContext& context,

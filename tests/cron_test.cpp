@@ -15,6 +15,46 @@
 #include <userver/engine/sleep.hpp>
 
 #include <servicelib/datasource/cron/libcron.hpp>
+#include <servicelib/datasource/cron/local_interval.hpp>
+#include "cron_interval_source_test.hpp"
+
+UTEST(CronDataSource, LocalIntervalGrammarAndBounds) {
+  using servicelib::datasource::cron::detail::ParseLocalInterval;
+  EXPECT_EQ(ParseLocalInterval("@every 10ms"), std::chrono::milliseconds{10});
+  EXPECT_EQ(ParseLocalInterval("@every 86400000ms"),
+            std::chrono::milliseconds{86400000});
+  EXPECT_FALSE(ParseLocalInterval("*/5 * * * *"));
+  for (const auto expression : {"@every", "@every 9ms", "@every 86400001ms",
+                               "@every 010ms", "@every +10ms", "@every 1s",
+                               "@every 10.5ms", "@every  10ms",
+                               "@every 10ms\n", "@every 10ms ",
+                               "@every 999999999999999999ms"}) {
+    EXPECT_THROW(ParseLocalInterval(expression), std::invalid_argument)
+        << expression;
+  }
+}
+
+UTEST(CronDataSource, LocalIntervalHasFixedSlotsAndBoundedCatchUp) {
+  using servicelib::datasource::cron::detail::LocalInterval;
+  using namespace std::chrono;
+  const auto anchor = LocalInterval::Clock::time_point{milliseconds{1234}} +
+                      microseconds{567};
+  LocalInterval schedule{milliseconds{100}, anchor};
+  EXPECT_EQ(schedule.delay(anchor), milliseconds{100});
+  EXPECT_FALSE(schedule.takeDue(anchor + milliseconds{99}));
+  const auto first = schedule.takeDue(anchor + milliseconds{100});
+  ASSERT_TRUE(first);
+  EXPECT_EQ(first->scheduledAt.time_since_epoch(), milliseconds{1334});
+  EXPECT_FALSE(first->missed);
+  const auto late = schedule.takeDue(anchor + milliseconds{1000000000});
+  ASSERT_TRUE(late);
+  EXPECT_TRUE(late->missed);
+  EXPECT_EQ(late->scheduledAt.time_since_epoch(), milliseconds{1000001234});
+  EXPECT_FALSE(schedule.takeDue(anchor + milliseconds{1000000000}));
+  EXPECT_EQ(schedule.delay(anchor + milliseconds{1000000000}),
+            milliseconds{100});
+  EXPECT_FALSE(schedule.takeDue(anchor));  // A backward clock does not replay.
+}
 
 UTEST(CronDataSource, AdaptsPortableExpressionsToLibcron) {
   using servicelib::datasource::cron::ToLibcronExpression;

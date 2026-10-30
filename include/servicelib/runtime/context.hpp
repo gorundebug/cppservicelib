@@ -196,6 +196,13 @@ class MessageContext final : public Context {
  public:
   MessageContext() : Context(std::make_shared<ContextState>()) {}
 
+  explicit MessageContext(const Context& parent) : MessageContext() {
+    state_->stopToken = parent.stopToken();
+    state_->deadline = parent.deadline();
+    state_->externalCancellations = parent.externalStopTokens();
+    state_->traceSamplingEnabled = parent.samplingEnabled();
+  }
+
   template <typename T>
   [[nodiscard]] std::shared_ptr<T> localValue(const ContextKey<T>& key) const {
     for (auto binding = derived()->localValues; binding; binding = binding->parent) {

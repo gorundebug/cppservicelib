@@ -1,4 +1,8 @@
 #include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <mutex>
+#include <stop_token>
 #include <exception>
 #include <functional>
 #include <memory>
@@ -7,6 +11,9 @@
 #include <vector>
 
 #include <userver/engine/single_use_event.hpp>
+#include <userver/engine/sleep.hpp>
+#include <userver/engine/task/current_task.hpp>
+#include <userver/kafka/impl/consumer.hpp>
 #include <userver/utest/utest.hpp>
 
 #include <servicelib/datasink/kafka/userver.hpp>
@@ -17,6 +24,7 @@
 #include <servicelib/runtime/testlog/testlog.hpp>
 #include <servicelib/runtime/testmetrics/testmetrics.hpp>
 #include <servicelib/runtime/testtracing/testtracing.hpp>
+#include <servicelib/transformation/streams.hpp>
 
 #if __has_include(<librdkafka/rdkafka_mock.h>)
 #include <librdkafka/rdkafka_mock.h>
@@ -151,6 +159,7 @@ class TestEnvironment final : public servicelib::IRuntimeEnvironment {
   servicelib::tracing::Tracing* getTracing() override { return tracingEngine; }
   servicelib::tracing::Tracing* tracingEngine{};
   bool forbidRuntimeConfigReads{};
+  TestConfig& config() noexcept { return config_; }
   [[nodiscard]] std::size_t serviceConfigReads() const noexcept {
     return serviceConfigReads_.load(std::memory_order_relaxed);
   }
@@ -163,6 +172,70 @@ class TestEnvironment final : public servicelib::IRuntimeEnvironment {
   servicelib::testmetrics::TestMetrics metrics_;
   mutable std::atomic<std::size_t> serviceConfigReads_{};
 };
+
+class OwnerContextKafkaClient final
+    : public servicelib::datasource::kafka::ConsumerClient {
+ public:
+  Callback callback;
+
+  void start(Callback value) override { callback = std::move(value); }
+  void stop() noexcept override {}
+};
+
+UTEST(KafkaProducerAdapter, PreservesOwnerContext) {
+  for (const bool cancelExternal : {false, true}) {
+    TestEnvironment environment;
+    OwnerContextKafkaClient client;
+    servicelib::datasource::kafka::detail::ProducerAdapter adapter(client, environment);
+    std::stop_source primary;
+    std::stop_source external;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(1);
+    auto owner = servicelib::Context{}
+                     .withStopToken(primary.get_token())
+                     .withExternalCancellation(external.get_token())
+                     .withDeadline(deadline)
+                     .withSampling(true);
+    std::vector<servicelib::MessageContext> observed;
+    adapter.start(owner, [&](servicelib::MessageContext context, auto) {
+      observed.push_back(std::move(context));
+    });
+    ASSERT_TRUE(client.callback);
+    client.callback({"key", "first", "events", 0, 1, {}, {{"x-stream-id", "first"}}});
+    client.callback({"key", "second", "events", 0, 2});
+    ASSERT_EQ(observed.size(), 2);
+    EXPECT_EQ(observed[0].streamId(), "first");
+    EXPECT_TRUE(observed[1].streamId().empty());
+    for (const auto& context : observed) {
+      ASSERT_TRUE(context.deadline());
+      EXPECT_EQ(*context.deadline(), deadline);
+      EXPECT_TRUE(context.stopToken() == primary.get_token());
+      ASSERT_EQ(context.externalStopTokens().size(), 1);
+      EXPECT_TRUE(context.externalStopTokens()[0] == external.get_token());
+      EXPECT_TRUE(context.samplingEnabled());
+      EXPECT_FALSE(context.cancelled());
+    }
+    (cancelExternal ? external : primary).request_stop();
+    for (const auto& context : observed) EXPECT_TRUE(context.cancelled());
+    adapter.stop(owner);
+  }
+}
+
+UTEST(KafkaProducerAdapter, PreservesExpiredDeadline) {
+  TestEnvironment environment;
+  OwnerContextKafkaClient client;
+  servicelib::datasource::kafka::detail::ProducerAdapter adapter(client, environment);
+  auto owner = servicelib::Context{}.withDeadline(
+      std::chrono::steady_clock::now() - std::chrono::seconds(1));
+  bool called = false;
+  adapter.start(owner, [&](servicelib::MessageContext context, auto) {
+    called = true;
+    EXPECT_TRUE(context.cancelled());
+    EXPECT_EQ(context.deadline(), owner.deadline());
+  });
+  client.callback({"key", "value", "events", 0, 1});
+  EXPECT_TRUE(called);
+  adapter.stop(owner);
+}
 
 class OneValueProducer final
     : public servicelib::datasource::localsource::DataProducer<std::string> {
@@ -764,6 +837,10 @@ class TestSourceInput final {
 };
 
 struct KafkaSourceHandler final {
+  void onError(servicelib::MessageContext context, auto& stream, std::exception_ptr error) {
+    stream.collectError(std::move(context), std::move(error));
+  }
+
   using State = int;
   userver::engine::SingleUseEvent* done;
   std::string* observed;
@@ -828,6 +905,10 @@ class CorrelatedKafkaInput final {
 };
 
 struct CorrelatedKafkaHandler final {
+  void onError(servicelib::MessageContext context, auto& stream, std::exception_ptr error) {
+    stream.collectError(std::move(context), std::move(error));
+  }
+
   using State = int;
   userver::engine::SingleUseEvent* done;
   std::vector<std::string>* events;
@@ -896,6 +977,10 @@ UTEST(KafkaDataSource, RetainsCallbackAndRejectsResultsAfterCompletion) {
 }
 
 struct WaitingKafkaSourceHandler final {
+  void onError(servicelib::MessageContext context, auto& stream, std::exception_ptr error) {
+    stream.collectError(std::move(context), std::move(error));
+  }
+
   using State = int;
   userver::engine::SingleUseEvent* entered;
   userver::engine::SingleUseEvent* ended;
@@ -980,3 +1065,5 @@ UTEST(KafkaAdmin, ReadsActualPartitionCountFromBrokerMetadata) {
 }
 
 }  // namespace
+
+#include "kafka_transaction_visibility_test.hpp"

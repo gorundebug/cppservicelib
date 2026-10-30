@@ -80,10 +80,18 @@ class EndpointState final {
     try {
       tasks_.CriticalAsyncDetach(
           "servicelib-custom-datasource", [this, context] {
-            producer_.start(context, [this](MessageContext messageContext,
+            try {
+              producer_.start(context, [this](MessageContext messageContext,
                                             Payload<Input> payload) {
-              submit(std::move(messageContext), std::move(payload));
-            });
+                submit(std::move(messageContext), std::move(payload));
+              });
+            } catch (...) {
+              const auto error = std::current_exception();
+              if (!context.cancelled() && !requestStopSource_.stop_requested()) {
+                handler_->onError(MessageContext{context}, streamContext_, error);
+              }
+              std::rethrow_exception(error);
+            }
           });
     } catch (...) {
       if (hasResult_) pending_.stop(context);
