@@ -31,6 +31,7 @@ class BidirectionalStreamingEndpoint final
 
   template <typename ReaderWriter>
   void handle(MessageContext context, ReaderWriter& stream) {
+    auto admission = this->acquireRequest();
     auto startedSpan = this->startTrace(context);
     auto sender = std::make_shared<Sender<Res>>(
         [&](Res response) { stream.Write(std::move(response)); },

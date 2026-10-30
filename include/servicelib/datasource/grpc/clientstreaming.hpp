@@ -31,6 +31,7 @@ class ClientStreamingEndpoint final
 
   template <typename Reader>
   Res handle(MessageContext context, Reader& reader) {
+    auto admission = this->acquireRequest();
     auto startedSpan = this->startTrace(context);
     std::optional<Res> response;
     auto requestSlot = std::make_shared<std::weak_ptr<Request>>();

@@ -29,6 +29,7 @@ class NoStreamingEndpoint final : public Endpoint<Req, Res, T, R, Handler, E> {
             std::move(errorOutput)) {}
 
   Res handle(MessageContext context, const Req& value) {
+    auto admission = this->acquireRequest();
     auto startedSpan = this->startTrace(context);
     std::optional<Res> response;
     userver::engine::SingleUseEvent responseReady;

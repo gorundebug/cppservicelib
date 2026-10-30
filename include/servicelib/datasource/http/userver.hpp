@@ -33,6 +33,7 @@
 #include <userver/tracing/span.hpp>
 #include <userver/utils/uuid7.hpp>
 
+#include <servicelib/datasource/detail/request_admission.hpp>
 #include <servicelib/runtime/stream_tracing.hpp>
 #include <servicelib/runtime/common.hpp>
 #include <servicelib/runtime/config/dataconnector_types.hpp>
@@ -194,6 +195,7 @@ class UserverEndpoint final : public IUserverEndpoint {
   }
 
   void stop(Context context) override {
+    admission_.stop(context);
     if (hasResult_) {
       pending_.stop(std::move(context));
     }
@@ -209,6 +211,12 @@ class UserverEndpoint final : public IUserverEndpoint {
 
   std::string handle(
       const userver::server::http::HttpRequest& request) override {
+    auto admission = admission_.acquire();
+    if (!admission) {
+      request.GetHttpResponse().SetStatus(
+          userver::server::http::HttpStatus::kServiceUnavailable);
+      return {};
+    }
     auto* const tracingEngine =
         tracingEngineAvailable_ ? environment_.getTracing() : nullptr;
     const bool samplingRequested =
@@ -558,6 +566,7 @@ class UserverEndpoint final : public IUserverEndpoint {
   Handler handler_;
   StreamContext streamContext_;
   bool hasResult_;
+  detail::RequestAdmission admission_;
   store::RotatingMap<std::string, std::shared_ptr<Result>> pending_;
   servicelib::DataSourceEndpointMetrics metrics_;
 };

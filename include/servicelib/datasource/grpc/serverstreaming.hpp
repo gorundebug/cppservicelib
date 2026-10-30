@@ -30,6 +30,7 @@ class ServerStreamingEndpoint final
 
   template <typename Writer>
   void handle(MessageContext context, const Req& value, Writer& writer) {
+    auto admission = this->acquireRequest();
     auto startedSpan = this->startTrace(context);
     auto sender = std::make_shared<Sender<Res>>(
         [&](Res response) { writer.Write(std::move(response)); },

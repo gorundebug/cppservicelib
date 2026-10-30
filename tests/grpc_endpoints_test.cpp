@@ -220,6 +220,8 @@ UTEST(GrpcDataSource, SupportsAllFourMethodTypesAndCorrelation) {
       unary.handle(servicelib::MessageContext{}.withStreamId("unary"), "one"),
       "reply:one");
   unary.stop(servicelib::Context{});
+  EXPECT_THROW(unary.handle(servicelib::MessageContext{}, "late"),
+               servicelib::OperationCancelledError);
 
   using Server = servicelib::datasource::grpc::ServerStreamingEndpoint<
       std::string, std::string, std::string, std::string, SourceHandler>;
@@ -240,6 +242,8 @@ UTEST(GrpcDataSource, SupportsAllFourMethodTypesAndCorrelation) {
   ASSERT_EQ(writer.values.size(), 1);
   EXPECT_EQ(writer.values[0], "reply:two");
   server.stop(servicelib::Context{});
+  EXPECT_THROW(server.handle(servicelib::MessageContext{}, "late", writer),
+               servicelib::OperationCancelledError);
 
   using Client = servicelib::datasource::grpc::ClientStreamingEndpoint<
       std::string, std::string, std::string, std::string, SourceHandler>;
@@ -259,6 +263,8 @@ UTEST(GrpcDataSource, SupportsAllFourMethodTypesAndCorrelation) {
                           reader),
             "reply:three");
   client.stop(servicelib::Context{});
+  EXPECT_THROW(client.handle(servicelib::MessageContext{}, reader),
+               servicelib::OperationCancelledError);
 
   using Bidi = servicelib::datasource::grpc::BidirectionalStreamingEndpoint<
       std::string, std::string, std::string, std::string, SourceHandler>;
@@ -279,6 +285,8 @@ UTEST(GrpcDataSource, SupportsAllFourMethodTypesAndCorrelation) {
   ASSERT_EQ(rw.FakeWriter::values.size(), 1);
   EXPECT_EQ(rw.FakeWriter::values[0], "reply:four");
   bidi.stop(servicelib::Context{});
+  EXPECT_THROW(bidi.handle(servicelib::MessageContext{}, rw),
+               servicelib::OperationCancelledError);
 }
 
 struct SinkHandler final {

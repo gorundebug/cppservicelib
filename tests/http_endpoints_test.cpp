@@ -332,6 +332,75 @@ struct NoResultSourceHandler {
                   auto&) noexcept {}
 };
 
+UTEST(HttpDataSource, StopClosesAdmissionAndWaitsForAcceptedHandler) {
+  TestEnvironment environment;
+  int consumed = 0;
+  userver::engine::SingleUseEvent entered;
+  userver::engine::SingleUseEvent release;
+  servicelib::datasource::http::UserverEndpoint<std::string, std::string,
+                                               NoResultSourceHandler>
+      endpoint{
+          environment, 1, NoResultSourceHandler{&consumed},
+          [&](servicelib::MessageContext, servicelib::Payload<std::string>) {
+            entered.Send();
+            release.Wait();
+          },
+          false};
+  auto request = userver::server::http::HttpRequestBuilder{}
+                     .SetMethod(userver::server::http::HttpMethod::kPost)
+                     .SetRequestPath("/messages")
+                     .Build();
+  auto handling = userver::utils::Async("accepted-http-request", [&] {
+    return endpoint.handle(*request);
+  });
+  entered.Wait();
+  auto stopping = userver::utils::Async("stop-http-admission", [&] {
+    endpoint.stop(servicelib::Context{}.bounded(std::chrono::seconds{1}));
+  });
+  userver::engine::SleepFor(std::chrono::milliseconds{5});
+  EXPECT_FALSE(stopping.IsFinished());
+  auto rejected = userver::server::http::HttpRequestBuilder{}
+                      .SetMethod(userver::server::http::HttpMethod::kPost)
+                      .SetRequestPath("/messages")
+                      .Build();
+  EXPECT_TRUE(endpoint.handle(*rejected).empty());
+  EXPECT_EQ(rejected->GetHttpResponse().GetStatus(),
+            userver::server::http::HttpStatus::kServiceUnavailable);
+  EXPECT_EQ(consumed, 1);
+  release.Send();
+  EXPECT_EQ(handling.Get(), "accepted");
+  stopping.Get();
+}
+
+UTEST(HttpDataSource, RequestAdmissionHonorsSharedShutdownDeadline) {
+  servicelib::datasource::detail::RequestAdmission admission;
+  {
+    auto request = admission.acquire();
+    ASSERT_TRUE(request);
+    EXPECT_THROW(
+        admission.stop(servicelib::Context{}.bounded(std::chrono::milliseconds{5})),
+        servicelib::OperationCancelledError);
+    EXPECT_FALSE(admission.acquire());
+  }
+  EXPECT_NO_THROW(admission.stop(servicelib::Context{}));
+}
+
+UTEST_MT(HttpDataSource, DrainedAdmissionCanBeDestroyedBeforeHandlerTask, 4) {
+  for (int iteration = 0; iteration < 512; ++iteration) {
+    auto admission =
+        std::make_unique<servicelib::datasource::detail::RequestAdmission>();
+    auto request = admission->acquire();
+    auto handling = userver::utils::Async(
+        "release-admitted-request", [request = std::move(request)]() mutable {
+          auto lease = std::move(request);
+          userver::engine::SleepFor(std::chrono::milliseconds{1});
+        });
+    admission->stop(servicelib::Context{}.bounded(std::chrono::seconds{1}));
+    admission.reset();
+    handling.Get();
+  }
+}
+
 UTEST(HttpDataSource, NoResultDoesNotWaitAndRejectsInvalidMethod) {
   TestEnvironment environment;
   int consumed = 0;

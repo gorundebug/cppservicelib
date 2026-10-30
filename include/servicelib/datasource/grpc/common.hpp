@@ -27,6 +27,7 @@
 #include <userver/ugrpc/server/metadata_utils.hpp>
 #include <userver/utils/uuid7.hpp>
 
+#include <servicelib/datasource/detail/request_admission.hpp>
 #include <servicelib/runtime/stream_tracing.hpp>
 #include <servicelib/runtime/common.hpp>
 #include <servicelib/runtime/config/dataconnector_types.hpp>
@@ -368,8 +369,18 @@ class Endpoint : public IEndpoint {
     if (hasResult_) pending_.start(std::move(context));
   }
   void stop(Context context) override {
+    admission_.stop(context);
     if (hasResult_) pending_.stop(std::move(context));
   }
+
+ protected:
+  [[nodiscard]] detail::RequestAdmission::Lease acquireRequest() {
+    auto lease = admission_.acquire();
+    if (!lease) throw OperationCancelledError("gRPC endpoint is stopping");
+    return lease;
+  }
+
+ public:
 
   [[nodiscard]] config::GrpcEndpointConfig endpointConfig() const {
     const auto config = environment_.getRuntimeConfigSnapshot();
@@ -646,6 +657,7 @@ class Endpoint : public IEndpoint {
 
  private:
   bool hasResult_;
+  detail::RequestAdmission admission_;
   store::RotatingMap<std::string, std::shared_ptr<Request>> pending_;
   DataSourceEndpointMetrics metrics_;
 };
