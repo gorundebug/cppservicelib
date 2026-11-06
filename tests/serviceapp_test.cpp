@@ -4,6 +4,7 @@
 #include <concepts>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -27,6 +28,14 @@ struct ServiceDataTypes final {
 
 class Service final : public servicelib::ServiceApp<Service, ServiceDataTypes> {
 };
+class RuntimeOwnerProbe final
+    : public servicelib::ServiceApp<RuntimeOwnerProbe, ServiceDataTypes> {
+ public:
+  bool runtimeBelongsToThisInstance() {
+    return &getExecutionRuntime<>().getExecutionEnvironment() == this;
+  }
+};
+
 
 class PriorityPoolConfig final : public servicelib::config::IConfig {
  public:
@@ -193,6 +202,56 @@ UTEST(ServiceLifecycle, StartsAndStopsInServiceAppOrder) {
             recorded.end());
   EXPECT_LT(std::find(recorded.begin() + 7, recorded.end(), "source:stop"),
             std::find(recorded.begin() + 7, recorded.end(), "delay:stop"));
+}
+
+UTEST(ServiceLifecycle, GraphOnlyStartupKeepsSourcesClosed) {
+  EventLog events;
+  servicelib::ServiceLifecycle lifecycle;
+  lifecycle.add(servicelib::ServiceComponentKind::kStorage,
+                std::make_shared<Component>("storage", &events));
+  lifecycle.add(servicelib::ServiceComponentKind::kDataSink,
+                std::make_shared<Component>("sink", &events));
+  lifecycle.add(servicelib::ServiceComponentKind::kDataSource,
+                std::make_shared<Component>("source", &events, true));
+  lifecycle.startGraph(servicelib::Context{});
+  EXPECT_EQ(events.snapshot(), (std::vector<std::string>{"storage:start", "sink:start"}));
+  EXPECT_THROW(lifecycle.start(servicelib::Context{}), std::logic_error);
+  EXPECT_THROW(lifecycle.startGraph(servicelib::Context{}), std::logic_error);
+  lifecycle.stop(servicelib::Context{});
+  EXPECT_EQ(events.snapshot(), (std::vector<std::string>{"storage:start", "sink:start", "storage:stop", "sink:stop"}));
+}
+
+UTEST(ServiceApp, ExecutionRuntimeBelongsToEachServiceInstance) {
+  PriorityPoolConfig config;
+  servicelib::config::RuntimeConfigRegistry::Publish(
+      std::make_shared<const servicelib::config::RuntimeConfig>(config));
+  {
+  std::optional<RuntimeOwnerProbe> first;
+  std::optional<RuntimeOwnerProbe> second;
+  first.emplace();
+  EXPECT_TRUE(first->runtimeBelongsToThisInstance());
+  first.reset();
+  second.emplace();
+  EXPECT_TRUE(second->runtimeBelongsToThisInstance());
+  }
+  servicelib::config::RuntimeConfigRegistry::Publish({});
+}
+
+UTEST(ServiceApp, GraphOnlyStartupUsesNormalShutdown) {
+  PriorityPoolConfig config;
+  servicelib::config::RuntimeConfigRegistry::Publish(
+      std::make_shared<const servicelib::config::RuntimeConfig>(config));
+  {
+  Service service;
+  EventLog events;
+  service.addComponent(std::make_shared<Component>("component", &events));
+  service.startGraph(servicelib::Context{});
+  EXPECT_TRUE(service.isRunning());
+  service.stop(servicelib::Context{});
+  EXPECT_TRUE(service.isStopped());
+  EXPECT_EQ(events.snapshot(), (std::vector<std::string>{"component:start", "component:stop"}));
+  }
+  servicelib::config::RuntimeConfigRegistry::Publish({});
 }
 
 UTEST(ServiceLifecycle, RollsBackAlreadyStartedComponents) {

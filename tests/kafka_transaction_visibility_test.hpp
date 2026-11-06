@@ -69,6 +69,8 @@ class VisibilityProducer final {
 };
 
 struct VisibilityHandler final {
+  std::optional<servicelib::datasource::kafka::CheckpointOffsets> restoreCheckpoint(
+      servicelib::MessageContext, auto&) const { return std::nullopt; }
   using State = int;
   std::atomic<unsigned>* errors;
   int concurrency(auto&) { return 2; }

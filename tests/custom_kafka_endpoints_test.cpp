@@ -69,7 +69,8 @@ class MockKafkaCluster final {
 
 class TestConfig final : public servicelib::config::IConfig {
  public:
-  TestConfig() {
+  explicit TestConfig(bool customEnabled = true) {
+    customEndpoint.enabled = customEnabled;
     customEndpoint.id = 1;
     customEndpoint.name = "custom-messages";
     customEndpoint.idDataConnector = 2;
@@ -131,7 +132,7 @@ class TestConfig final : public servicelib::config::IConfig {
 
 class TestEnvironment final : public servicelib::IRuntimeEnvironment {
  public:
-  TestEnvironment() : runtimeConfig_(config_) {
+  explicit TestEnvironment(bool customEnabled = true) : config_(customEnabled), runtimeConfig_(config_) {
     service_.name = "endpoint-test";
   }
   servicelib::pool::ITaskPool* getTaskPool(const std::string&) override {
@@ -178,7 +179,10 @@ class OwnerContextKafkaClient final
  public:
   Callback callback;
 
-  void start(Callback value) override { callback = std::move(value); }
+  void start(servicelib::Context, servicelib::datasource::kafka::RestoreCheckpoint restore, Callback value, ErrorCallback) override {
+    (void)restore();
+    callback = std::move(value);
+  }
   void stop() noexcept override {}
 };
 
@@ -198,7 +202,8 @@ UTEST(KafkaProducerAdapter, PreservesOwnerContext) {
     std::vector<servicelib::MessageContext> observed;
     adapter.start(owner, [&](servicelib::MessageContext context, auto) {
       observed.push_back(std::move(context));
-    });
+    }, [](servicelib::Context, std::exception_ptr error) { std::rethrow_exception(error); },
+       []() -> std::optional<servicelib::datasource::kafka::CheckpointOffsets> { return std::nullopt; });
     ASSERT_TRUE(client.callback);
     client.callback({"key", "first", "events", 0, 1, {}, {{"x-stream-id", "first"}}});
     client.callback({"key", "second", "events", 0, 2});
@@ -231,7 +236,8 @@ UTEST(KafkaProducerAdapter, PreservesExpiredDeadline) {
     called = true;
     EXPECT_TRUE(context.cancelled());
     EXPECT_EQ(context.deadline(), owner.deadline());
-  });
+  }, [](servicelib::Context, std::exception_ptr error) { std::rethrow_exception(error); },
+     []() -> std::optional<servicelib::datasource::kafka::CheckpointOffsets> { return std::nullopt; });
   client.callback({"key", "value", "events", 0, 1});
   EXPECT_TRUE(called);
   adapter.stop(owner);
@@ -240,11 +246,14 @@ UTEST(KafkaProducerAdapter, PreservesExpiredDeadline) {
 class OneValueProducer final
     : public servicelib::datasource::localsource::DataProducer<std::string> {
  public:
+  std::atomic<int> starts{0};
+  std::atomic<int> stops{0};
   void start(servicelib::Context, Consumer consumer) override {
+    ++starts;
     consumer(servicelib::MessageContext{},
              servicelib::Payload<std::string>::make("input"));
   }
-  void stop(servicelib::Context) override {}
+  void stop(servicelib::Context) override { ++stops; }
 };
 
 struct CustomSourceHandler final {
@@ -291,6 +300,29 @@ UTEST(CustomDataSource, RunsProducerAndHandlerLifecycle) {
   done.Wait();
   endpoint.stop(servicelib::Context{});
   EXPECT_EQ(observed, "input");
+}
+
+UTEST(CustomDataSource, DisabledSourceDoesNotInvokeProducer) {
+  TestEnvironment environment{false};
+  OneValueProducer producer;
+  userver::engine::SingleUseEvent done;
+  std::string observed;
+  using Endpoint =
+      servicelib::datasource::localsource::Endpoint<std::string, int,
+                                                    CustomSourceHandler>;
+  Endpoint endpoint{
+      environment,
+      1,
+      producer,
+      CustomSourceHandler{&done, &observed},
+      [](servicelib::MessageContext, servicelib::Payload<std::string>) {},
+      false};
+  endpoint.start(servicelib::Context{});
+
+  endpoint.stop(servicelib::Context{});
+  EXPECT_EQ(producer.starts.load(), 0);
+  EXPECT_EQ(producer.stops.load(), 0);
+  EXPECT_TRUE(observed.empty());
 }
 
 struct MultiResultSourceHandler final {
@@ -803,7 +835,8 @@ UTEST(KafkaDataSink, PassesAsyncDeliveryFailureToCallback) {
 class FakeKafkaConsumer final
     : public servicelib::datasource::kafka::ConsumerClient {
  public:
-  void start(Callback callback) override {
+  void start(servicelib::Context, servicelib::datasource::kafka::RestoreCheckpoint restore, Callback callback, ErrorCallback) override {
+    (void)restore();
     callback(servicelib::datasource::kafka::ConsumerMessage{
         "key", "payload", "events", 2, 9, [this] { committed = true; }, headers});
   }
@@ -837,6 +870,8 @@ class TestSourceInput final {
 };
 
 struct KafkaSourceHandler final {
+  std::optional<servicelib::datasource::kafka::CheckpointOffsets> restoreCheckpoint(
+      servicelib::MessageContext, auto&) const { return std::nullopt; }
   void onError(servicelib::MessageContext context, auto& stream, std::exception_ptr error) {
     stream.collectError(std::move(context), std::move(error));
   }
@@ -905,6 +940,8 @@ class CorrelatedKafkaInput final {
 };
 
 struct CorrelatedKafkaHandler final {
+  std::optional<servicelib::datasource::kafka::CheckpointOffsets> restoreCheckpoint(
+      servicelib::MessageContext, auto&) const { return std::nullopt; }
   void onError(servicelib::MessageContext context, auto& stream, std::exception_ptr error) {
     stream.collectError(std::move(context), std::move(error));
   }
@@ -977,6 +1014,8 @@ UTEST(KafkaDataSource, RetainsCallbackAndRejectsResultsAfterCompletion) {
 }
 
 struct WaitingKafkaSourceHandler final {
+  std::optional<servicelib::datasource::kafka::CheckpointOffsets> restoreCheckpoint(
+      servicelib::MessageContext, auto&) const { return std::nullopt; }
   void onError(servicelib::MessageContext context, auto& stream, std::exception_ptr error) {
     stream.collectError(std::move(context), std::move(error));
   }
@@ -1067,3 +1106,5 @@ UTEST(KafkaAdmin, ReadsActualPartitionCountFromBrokerMetadata) {
 }  // namespace
 
 #include "kafka_transaction_visibility_test.hpp"
+
+#include "kafka_checkpoint_test.hpp"

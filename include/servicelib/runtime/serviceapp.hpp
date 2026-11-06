@@ -85,7 +85,12 @@ class ServiceLifecycle final {
         .onStopTimeout = std::move(onStopTimeout)});
   }
 
-  void start(Context context) {
+  // Choose startGraph OR start once per lifecycle, then stop either mode.
+  void startGraph(Context context) { startImpl(std::move(context), false); }
+  void start(Context context) { startImpl(std::move(context), true); }
+
+ private:
+  void startImpl(Context context, bool admission) {
     const auto transition = transition_.acquire(context);
     if (state_ != State::kCreated) {
       throw std::logic_error("service lifecycle is already started");
@@ -94,6 +99,7 @@ class ServiceLifecycle final {
     state_ = State::kStarting;
     try {
       for (const auto kind : kStartOrder) {
+        if (!admission && kind == ServiceComponentKind::kDataSource) continue;
         for (auto& entry : entries_[index(kind)]) {
           entry.started = true;
           started_.push_back(&entry);
@@ -114,6 +120,7 @@ class ServiceLifecycle final {
     }
   }
 
+ public:
   void stop(Context context,
             log::Logger& logger = log::NoopLogger::instance()) {
     stopBeforeGraphDrain(context, logger);
@@ -496,7 +503,12 @@ class ServiceApp
     lifecycle_.add(ServiceComponentKind::kComponent, std::move(component));
   }
 
-  void start(Context context) {
+  // Choose startGraph OR start once per lifecycle, then stop either mode.
+  void startGraph(Context context) { startImpl(std::move(context), false); }
+  void start(Context context) { startImpl(std::move(context), true); }
+
+ private:
+  void startImpl(Context context, bool admission) {
     const auto transition = transition_.acquire(context);
     if (lifecyclePending_) throw std::logic_error("service lifecycle is already active");
     lifecyclePending_ = true;
@@ -504,10 +516,12 @@ class ServiceApp
       ensureConfiguredPools();
       this->startExecutionRuntime();
       status::Registry::Register(*this);
-      lifecycle_.start(context);
+      if (admission) lifecycle_.start(context);
+      else lifecycle_.startGraph(context);
       running_ = true;
     } catch (...) {
       const auto error = std::current_exception();
+      running_ = false;
       status::Registry::Unregister(*this);
       try {
         lifecycle_.stop(context, this->getLogger());
@@ -522,6 +536,7 @@ class ServiceApp
     }
   }
 
+ public:
   void stop(Context context) {
     if (const auto service = this->getServiceConfigSnapshot();
         service && service->shutdownTimeout > 0) {

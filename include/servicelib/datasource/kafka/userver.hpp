@@ -25,6 +25,15 @@
 
 namespace servicelib::datasource::kafka {
 
+using CheckpointOffsets = std::map<std::int32_t, std::int64_t>;
+using RestoreCheckpoint = std::function<std::optional<CheckpointOffsets>()>;
+
+class CheckpointRestoreError final : public std::runtime_error {
+ public:
+  using std::runtime_error::runtime_error;
+};
+
+
 // The payload is copied out of userver::kafka::Message because the original
 // view is valid only for the ConsumerScope batch callback.
 class ConsumerMessage final {
@@ -70,7 +79,8 @@ class ConsumerClient {
  public:
   using Callback = std::function<void(ConsumerMessage)>;
   virtual ~ConsumerClient() = default;
-  virtual void start(Callback callback) = 0;
+  using ErrorCallback = std::function<void(std::exception_ptr)>;
+  virtual void start(Context owner, RestoreCheckpoint restore, Callback callback, ErrorCallback onError) = 0;
   virtual void stop() noexcept = 0;
 };
 
@@ -81,7 +91,17 @@ class UserverConsumerClient final : public ConsumerClient {
       : consumer_(consumer), topic_(std::move(topic)),
         tracingEnabled_(tracingEnabled) {}
 
-  void start(Callback callback) override {
+  void start(Context owner, RestoreCheckpoint restore, Callback callback, ErrorCallback) override {
+    if (owner.cancelled()) throw CheckpointRestoreError("Kafka startup cancelled");
+    // The stock ConsumerScope exposes Seek but not the error/reset and batch
+    // boundaries required by our durable-checkpoint contract. Do not silently
+    // substitute broker offsets or introduce a patched userver dependency.
+    if (restore()) {
+      throw CheckpointRestoreError(
+          "Kafka checkpoint restoration is not supported by cppUserver; "
+          "restoreCheckpoint must return std::nullopt");
+    }
+    if (owner.cancelled()) throw CheckpointRestoreError("Kafka startup cancelled");
     const auto& topics = consumer_.GetTopics();
     if (std::find(topics.begin(), topics.end(), topic_) == topics.end()) {
       throw std::invalid_argument(
@@ -181,13 +201,18 @@ class ProducerAdapter final {
   ProducerAdapter(ConsumerClient& client, IServiceEnvironment& environment)
       : client_(client), tracingEnabled_(environment.getTracing() != nullptr) {}
 
-  void start(Context owner, Consumer consumer) {
-    client_.start([owner = std::move(owner), tracingEnabled = tracingEnabled_,
+  void start(Context owner, Consumer consumer,
+             std::function<void(Context, std::exception_ptr)> onError,
+             RestoreCheckpoint restore) {
+    client_.start(owner, std::move(restore), [owner, tracingEnabled = tracingEnabled_,
                    consumer = std::move(consumer)](ConsumerMessage message) {
-      auto context = servicelib::detail::ContextFromKafkaHeaders(
-          MessageContext{owner}, message.headers(), tracingEnabled);
+      auto context = MessageContext{owner};
+      context = servicelib::detail::ContextFromKafkaHeaders(
+          std::move(context), message.headers(), tracingEnabled);
       consumer(std::move(context),
                Payload<ConsumerMessage>::make(std::move(message)));
+    }, [owner, onError = std::move(onError)](std::exception_ptr error) {
+      onError(owner, std::move(error));
     });
   }
   void stop(Context) { client_.stop(); }
@@ -203,6 +228,9 @@ class HandlerAdapter final {
   using State = typename Handler::State;
   explicit HandlerAdapter(Handler handler) : handler_(std::move(handler)) {}
 
+  std::optional<CheckpointOffsets> restoreCheckpoint(MessageContext context, SourceStreamContext<T, R, E>& stream) {
+    return handler_.restoreCheckpoint(std::move(context), stream);
+  }
   int concurrency(SourceStreamContext<T, R, E>& context) {
     return handler_.concurrency(context);
   }

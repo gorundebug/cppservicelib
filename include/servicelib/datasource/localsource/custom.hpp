@@ -173,6 +173,7 @@ class Endpoint final : public IEndpoint {
   [[nodiscard]] int id() const noexcept override { return endpointId_; }
 
   void start(Context context) override {
+    if (!endpointConfig(environment_, endpointId_).enabled) return;
     bool expected = false;
     if (!started_.compare_exchange_strong(expected, true,
                                           std::memory_order_acq_rel)) {

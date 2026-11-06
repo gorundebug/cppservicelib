@@ -14,6 +14,7 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include <userver/concurrent/background_task_storage.hpp>
 #include <userver/engine/condition_variable.hpp>
@@ -75,6 +76,7 @@ class EndpointState final {
       throw std::logic_error("custom datasource endpoint already started");
     }
     requestStopSource_ = std::stop_source{};
+    context = context.withExternalCancellation(requestStopSource_.get_token());
     stopped_ = false;
     if (hasResult_) pending_.start(context);
     try {
@@ -84,6 +86,10 @@ class EndpointState final {
               producer_.start(context, [this](MessageContext messageContext,
                                             Payload<Input> payload) {
                 submit(std::move(messageContext), std::move(payload));
+              }, [this](Context owner, std::exception_ptr error) {
+                handler_->onError(MessageContext{owner}, streamContext_, std::move(error));
+              }, [this, context] {
+                return handler_->restoreCheckpoint(MessageContext{context}, streamContext_);
               });
             } catch (...) {
               const auto error = std::current_exception();
@@ -174,7 +180,7 @@ class EndpointState final {
 
  private:
   void submit(MessageContext context, Payload<Input> payload) {
-    if (!acquire()) return;
+    if (!acquire(context)) return;
     // Finish this message before returning to the Kafka partition consumer.
     struct Release final {
       EndpointState* endpoint;
@@ -183,10 +189,19 @@ class EndpointState final {
     process(std::move(context), std::move(payload));
   }
 
-  bool acquire() {
+  bool acquire(const Context& context) {
+    const auto wake = [this] {
+      std::lock_guard lock(concurrencyMutex_);
+      concurrencyCv_.NotifyAll();
+    };
+    std::stop_callback primary{context.stopToken(), wake};
+    std::vector<std::unique_ptr<std::stop_callback<decltype(wake)>>> cancellations;
+    for (const auto& token : context.externalStopTokens()) {
+      cancellations.push_back(std::make_unique<std::stop_callback<decltype(wake)>>(token, wake));
+    }
     std::unique_lock lock(concurrencyMutex_);
     for (;;) {
-      if (stopped_) return false;
+      if (stopped_ || context.cancelled()) return false;
       const auto limit = handler_->concurrency(streamContext_);
       if (limit <= 0 || active_ < static_cast<std::size_t>(limit)) {
         ++active_;
@@ -284,6 +299,16 @@ class EndpointState final {
                   result->done.Send();
                 }
               }};
+          const auto wakeExternal = [result] {
+            bool expected = false;
+            if (result->wakeSent.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+              result->done.Send();
+            }
+          };
+          std::vector<std::unique_ptr<std::stop_callback<decltype(wakeExternal)>>> externalCancellations;
+          for (const auto& token : context.externalStopTokens()) {
+            externalCancellations.push_back(std::make_unique<std::stop_callback<decltype(wakeExternal)>>(token, wakeExternal));
+          }
           std::stop_callback endpointCancellation{
               requestStopSource_.get_token(), [result] {
                 bool expected = false;

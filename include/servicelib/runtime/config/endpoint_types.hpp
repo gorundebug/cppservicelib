@@ -176,6 +176,7 @@ struct CustomEndpointConfig {
   std::string name;
   int idDataConnector{};
   bool tracingEnabled{};
+  bool enabled{};
   std::string functionName;
   std::string functionPackage;
   bool publicFunction{};
@@ -332,10 +333,11 @@ inline CustomEndpointConfig Parse(
   result.name = value["name"].As<std::string>("");
   result.idDataConnector = value["idDataConnector"].As<int>(0);
   result.tracingEnabled = value["tracingEnabled"].As<bool>(false);
+  result.enabled = value["enabled"].As<bool>(false);
   detail::ParseFunctionFields(value, result);
   detail::ParseRemainingProperties(
       value,
-      {"id", "name", "idDataConnector", "tracingEnabled", "functionName", "functionPackage",
+      {"id", "name", "idDataConnector", "tracingEnabled", "enabled", "functionName", "functionPackage",
        "publicFunction", "functionDescription", "functionInitializerGroup",
        "functionModule"},
       result.properties);

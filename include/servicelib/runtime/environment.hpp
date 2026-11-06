@@ -356,8 +356,7 @@ class StreamExecutionEnvironment : public NotCopyableOrMovable,
                   "config-driven C++ graph directly");
     buildTopology();
     verifyTopology();
-    static ExecutionRuntime runtime(*this);
-    return runtime;
+    return executionRuntime_;
   }
 
  private:
@@ -421,6 +420,7 @@ class StreamExecutionEnvironment : public NotCopyableOrMovable,
   // Per-message dispatch uses the prepared caller pointer directly.
   std::string topologyCode_;
   bool topologyBuilt_{false};
+  ExecutionRuntime executionRuntime_{*this};
   ExecutionRuntime* activeRuntime_{nullptr};
 };
 
