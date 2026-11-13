@@ -270,10 +270,8 @@ class DataSourceEndpointMetrics final {
                                     const std::string& endpoint,
                                     std::string protocol) {
     metrics::Labels labels{{"connector", std::move(connector)},
-                           {"endpoint", endpoint}};
-    if (!protocol.empty()) {
-      labels.emplace("protocol", std::move(protocol));
-    }
+                           {"endpoint", endpoint},
+                           {"protocol", std::move(protocol)}};
     return labels;
   }
 

@@ -97,6 +97,27 @@ UTEST(TestTelemetry, MetricsRecordAllInstrumentKindsAndReset) {
   EXPECT_TRUE(metrics.registeredNames().empty());
 }
 
+UTEST(TestTelemetry, EndpointProtocolLabelSchemaIsStableInBothRegistrationOrders) {
+  for (const bool grpcFirst : {false, true}) {
+    servicelib::testmetrics::TestMetrics metrics;
+    servicelib::testlog::TestLog log;
+    for (const bool grpc : {grpcFirst, !grpcFirst}) {
+      const std::string endpoint = grpc ? "grpc" : "http";
+      const std::string protocol = grpc ? "grpc" : "";
+      servicelib::DataSourceEndpointMetrics source{
+          metrics, log, "connector", endpoint, protocol};
+      servicelib::DataSinkEndpointMetrics sink{
+          metrics, log, "connector", endpoint, protocol};
+      source.requestEnd(source.requestStart(), {});
+      sink.requestEnd(sink.requestStart(), {});
+      const servicelib::metrics::Labels labels{
+          {"connector", "connector"}, {"endpoint", endpoint}, {"protocol", protocol}};
+      EXPECT_EQ(metrics.counter("datasource_endpoint.messages_total", labels).count(), 1);
+      EXPECT_EQ(metrics.counter("datasink_endpoint.messages_total", labels).count(), 1);
+    }
+  }
+}
+
 UTEST(TestTelemetry, NoopMetricsAdvertiseAndUseDisabledFastPath) {
   auto& metrics = servicelib::metrics::NoopMetrics::instance();
   EXPECT_FALSE(metrics.enabled());
@@ -228,7 +249,8 @@ UTEST(TestTelemetry, SourceEndpointRecordsTheGoEventAndPendingMetricSet) {
   servicelib::DataSourceEndpointMetrics endpoint{metrics, log, "connector",
                                                  "endpoint"};
   const servicelib::metrics::Labels base{{"connector", "connector"},
-                                         {"endpoint", "endpoint"}};
+                                         {"endpoint", "endpoint"},
+                                         {"protocol", ""}};
 
   endpoint.missingStreamId();
   endpoint.lateResult("stream");
@@ -275,6 +297,7 @@ UTEST(TestTelemetry, SinkEndpointRecordsLateResults) {
                 .counter("datasink_endpoint.events_total",
                          {{"connector", "connector"},
                           {"endpoint", "endpoint"},
+                          {"protocol", ""},
                           {"event", "late_result"}})
                 .count(),
             1);

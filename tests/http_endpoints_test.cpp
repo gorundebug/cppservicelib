@@ -582,7 +582,7 @@ UTEST(HttpDataSource, CancellationIsVisibleAndPendingAgeIsObservable) {
   userver::engine::SleepFor(std::chrono::milliseconds{5});
 
   const servicelib::metrics::Labels labels{{"connector", "http"},
-                                           {"endpoint", "messages"}};
+                                           {"endpoint", "messages"}, {"protocol", ""}};
   EXPECT_GT(environment.metrics()
                 .observableGauge(
                     "datasource_endpoint.pending_oldest_age_seconds", labels)
@@ -712,7 +712,7 @@ UTEST(HttpDataSink, ExecutesUserRequestAndPropagatesStreamId) {
   EXPECT_EQ(endCalls, 1);
   EXPECT_FALSE(hadError);
   const servicelib::metrics::Labels labels{{"connector", "http"},
-                                            {"endpoint", "messages"}};
+                                            {"endpoint", "messages"}, {"protocol", ""}};
   EXPECT_EQ(environment.metrics()
                 .counter("datasink_endpoint.messages_total", labels)
                 .count(),
