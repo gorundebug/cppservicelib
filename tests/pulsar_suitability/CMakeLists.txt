@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.24)
+project(pulsar_suitability LANGUAGES CXX)
+find_package(userver REQUIRED COMPONENTS core)
+add_executable(pulsar_suitability probe.cpp)
+target_compile_features(pulsar_suitability PRIVATE cxx_std_20)
+target_include_directories(pulsar_suitability PRIVATE ${PULSAR_ROOT}/include ${PROBE_COMMON})
+target_link_libraries(pulsar_suitability PRIVATE userver::core ${PULSAR_ROOT}/lib/libpulsar.so)

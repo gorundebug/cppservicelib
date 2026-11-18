@@ -1,4 +1,5 @@
 #pragma once
+#include <servicelib/runtime/detail/source_metrics.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -174,9 +175,17 @@ class UserverConsumerClient final : public ConsumerClient {
             }));
       }
       bool commit = false;
+      std::exception_ptr failure;
       for (auto& task : tasks) {
-        commit = task.Get() || commit;
+        try {
+          commit = task.Get() || commit;
+        } catch (...) {
+          if (!failure) failure = std::current_exception();
+        }
       }
+      // Join every partition before releasing the native batch. A successful
+      // sibling must never authorize a batch commit covering failed work.
+      if (failure) std::rethrow_exception(failure);
       // ConsumerScope is not thread-safe. Keep the actual transport operation
       // on the original batch callback task after all partition lanes finish.
       if (commit) {
@@ -198,14 +207,18 @@ namespace detail {
 class ProducerAdapter final {
  public:
   using Consumer = std::function<void(MessageContext, Payload<ConsumerMessage>)>;
-  ProducerAdapter(ConsumerClient& client, IServiceEnvironment& environment)
-      : client_(client), tracingEnabled_(environment.getTracing() != nullptr) {}
+  ProducerAdapter(ConsumerClient& client, IServiceEnvironment& environment,
+                  std::string connector, std::string endpoint)
+      : client_(client), tracingEnabled_(environment.getTracing() != nullptr),
+        observations_(std::make_shared<servicelib::detail::SourceMetrics>(
+            environment.getMetrics(), "kafka", connector, endpoint)) {}
 
   void start(Context owner, Consumer consumer,
              std::function<void(Context, std::exception_ptr)> onError,
              RestoreCheckpoint restore) {
-    client_.start(owner, std::move(restore), [owner, tracingEnabled = tracingEnabled_,
+    client_.start(owner, std::move(restore), [owner, tracingEnabled = tracingEnabled_, observations = observations_,
                    consumer = std::move(consumer)](ConsumerMessage message) {
+      observations->observe("received");
       auto context = MessageContext{owner};
       context = servicelib::detail::ContextFromKafkaHeaders(
           std::move(context), message.headers(), tracingEnabled);
@@ -220,6 +233,7 @@ class ProducerAdapter final {
  private:
   ConsumerClient& client_;
   bool tracingEnabled_{};
+  std::shared_ptr<servicelib::detail::SourceMetrics> observations_;
 };
 
 template <typename Handler, typename T, typename R, typename E>
@@ -312,7 +326,8 @@ class Endpoint final {
   Endpoint(IServiceEnvironment& environment, int endpointId,
            int streamConfigId, ConsumerClient& consumer, Handler handler,
            Output output, bool hasResult, ErrorOutput errorOutput = {})
-      : producer_(consumer, environment),
+      : producer_(consumer, environment, connectorConfig(environment, endpointId).name,
+                  endpointConfig(environment, endpointId).name),
         environment_(environment),
         endpointId_(endpointId),
         implementation_(

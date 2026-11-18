@@ -8,12 +8,16 @@
 #pragma once
 
 #include <functional>
+#include <cstdint>
+#include <vector>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <variant>
+#include <servicelib/runtime/config/pulsar.hpp>
 
 #include <userver/formats/parse/to.hpp>
+#include <userver/formats/parse/common_containers.hpp>
 #include <userver/formats/yaml/value.hpp>
 
 #include <servicelib/api/serviceapi.hpp>
@@ -85,6 +89,31 @@ struct KafkaDataConnectorConfig {
   }
 };
 
+struct NATSDataConnectorConfig {
+  int id{};
+  std::string name;
+  servicelib::api::DataConnectorType type{servicelib::api::DataConnectorType::kNATS};
+  servicelib::api::DataConnectorImplementation implementation{};
+  servicelib::api::ProgrammingLanguage programmingLanguage{};
+  std::vector<std::string> servers{"nats://localhost:4222"};
+  std::int64_t connectTimeoutMs{2000};
+  std::int64_t operationTimeoutMs{5000};
+  std::string username;
+  std::string password;
+  std::string token;
+  std::string credentialsFile;
+  bool tlsEnabled{};
+  std::string tlsServerName;
+  std::string tlsCaFile;
+  std::string tlsCertFile;
+  std::string tlsKeyFile;
+  PropertiesMap properties;
+  servicelib::api::DataConnectorType GetType() const noexcept { return type; }
+  const userver::formats::yaml::Value* GetProperty(const std::string& name) const {
+    return detail::FindProperty(properties, name);
+  }
+};
+
 struct CronDataConnectorConfig {
   int id{};
   std::string name;
@@ -144,9 +173,11 @@ struct CustomDataConnectorConfig {
 class DataConnectorConfigRef {
  public:
   using Variant =
-      std::variant<std::reference_wrapper<const HttpDataConnectorConfig>,
+      std::variant<std::reference_wrapper<const PulsarDataConnectorConfig>,
+                   std::reference_wrapper<const HttpDataConnectorConfig>,
                    std::reference_wrapper<const GrpcDataConnectorConfig>,
                    std::reference_wrapper<const KafkaDataConnectorConfig>,
+                   std::reference_wrapper<const NATSDataConnectorConfig>,
                    std::reference_wrapper<const CronDataConnectorConfig>,
                    std::reference_wrapper<const TemporalDataConnectorConfig>,
                    std::reference_wrapper<const CustomDataConnectorConfig>>;
@@ -162,12 +193,14 @@ class DataConnectorConfigRef {
   }
 
  public:
+  DataConnectorConfigRef(const PulsarDataConnectorConfig& v) : value_(std::cref(v)) {}
   DataConnectorConfigRef(const HttpDataConnectorConfig& v)
       : value_(std::cref(v)) {}
   DataConnectorConfigRef(const GrpcDataConnectorConfig& v)
       : value_(std::cref(v)) {}
   DataConnectorConfigRef(const KafkaDataConnectorConfig& v)
       : value_(std::cref(v)) {}
+  DataConnectorConfigRef(const NATSDataConnectorConfig& v) : value_(std::cref(v)) {}
   DataConnectorConfigRef(const CronDataConnectorConfig& v)
       : value_(std::cref(v)) {}
   DataConnectorConfigRef(const TemporalDataConnectorConfig& v)
@@ -336,6 +369,30 @@ inline TemporalDataConnectorConfig Parse(
        "apiKey", "tlsEnabled", "tlsServerName", "tlsCaFile", "tlsCertFile",
        "tlsKeyFile", "workerStopTimeout"},
       result.properties);
+  return result;
+}
+
+inline NATSDataConnectorConfig Parse(const userver::formats::yaml::Value& value,
+    userver::formats::parse::To<NATSDataConnectorConfig>) {
+  NATSDataConnectorConfig result;
+  result.id = value["id"].As<int>(result.id);
+  result.name = value["name"].As<std::string>(result.name);
+  result.type = value["type"].As<servicelib::api::DataConnectorType>(result.type);
+  result.implementation = value["implementation"].As<servicelib::api::DataConnectorImplementation>(result.implementation);
+  result.programmingLanguage = value["programmingLanguage"].As<servicelib::api::ProgrammingLanguage>(result.programmingLanguage);
+  result.servers = value["servers"].As<std::vector<std::string>>(result.servers);
+  result.connectTimeoutMs = value["connectTimeoutMs"].As<std::int64_t>(result.connectTimeoutMs);
+  result.operationTimeoutMs = value["operationTimeoutMs"].As<std::int64_t>(result.operationTimeoutMs);
+  result.username = value["username"].As<std::string>(result.username);
+  result.password = value["password"].As<std::string>(result.password);
+  result.token = value["token"].As<std::string>(result.token);
+  result.credentialsFile = value["credentialsFile"].As<std::string>(result.credentialsFile);
+  result.tlsEnabled = value["tlsEnabled"].As<bool>(result.tlsEnabled);
+  result.tlsServerName = value["tlsServerName"].As<std::string>(result.tlsServerName);
+  result.tlsCaFile = value["tlsCaFile"].As<std::string>(result.tlsCaFile);
+  result.tlsCertFile = value["tlsCertFile"].As<std::string>(result.tlsCertFile);
+  result.tlsKeyFile = value["tlsKeyFile"].As<std::string>(result.tlsKeyFile);
+  detail::ParseRemainingProperties(value, {"id","name","type","implementation","programmingLanguage","servers","connectTimeoutMs","operationTimeoutMs","username","password","token","credentialsFile","tlsEnabled","tlsServerName","tlsCaFile","tlsCertFile","tlsKeyFile"}, result.properties);
   return result;
 }
 

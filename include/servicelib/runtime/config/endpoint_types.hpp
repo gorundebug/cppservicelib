@@ -8,10 +8,13 @@
 #pragma once
 
 #include <functional>
+#include <cstdint>
+#include <vector>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <variant>
+#include <servicelib/runtime/config/pulsar.hpp>
 
 #include <userver/formats/parse/to.hpp>
 #include <userver/formats/yaml/value.hpp>
@@ -98,6 +101,32 @@ struct KafkaEndpointConfig {
   const userver::formats::yaml::Value* GetProperty(
       const std::string& propName) const {
     return detail::FindProperty(properties, propName);
+  }
+};
+
+struct NATSEndpointConfig {
+  int id{};
+  std::string name;
+  servicelib::api::DataConnectorType type{servicelib::api::DataConnectorType::kNATS};
+  int idDataConnector{};
+  bool tracingEnabled{};
+  bool enabled{};
+  std::string subject;
+  std::string queueGroup;
+  std::string streamName;
+  std::string durableName;
+  bool createStream{};
+  bool createConsumer{};
+  std::string functionName;
+  std::string functionPackage;
+  std::string functionDescription;
+  std::string functionInitializerGroup;
+  std::string functionModule;
+  bool publicFunction{};
+  PropertiesMap properties;
+  servicelib::api::DataConnectorType GetType() const noexcept { return type; }
+  const userver::formats::yaml::Value* GetProperty(const std::string& name) const {
+    return detail::FindProperty(properties, name);
   }
 };
 
@@ -199,9 +228,11 @@ struct CustomEndpointConfig {
 class EndpointConfigRef {
  public:
   using Variant =
-      std::variant<std::reference_wrapper<const HttpEndpointConfig>,
+      std::variant<std::reference_wrapper<const PulsarEndpointConfig>,
+                   std::reference_wrapper<const HttpEndpointConfig>,
                    std::reference_wrapper<const GrpcEndpointConfig>,
                    std::reference_wrapper<const KafkaEndpointConfig>,
+                   std::reference_wrapper<const NATSEndpointConfig>,
                    std::reference_wrapper<const CronEndpointConfig>,
                    std::reference_wrapper<const TemporalEndpointConfig>,
                    std::reference_wrapper<const CustomEndpointConfig>>;
@@ -217,9 +248,11 @@ class EndpointConfigRef {
   }
 
  public:
+  EndpointConfigRef(const PulsarEndpointConfig& v) : value_(std::cref(v)) {}
   EndpointConfigRef(const HttpEndpointConfig& v) : value_(std::cref(v)) {}
   EndpointConfigRef(const GrpcEndpointConfig& v) : value_(std::cref(v)) {}
   EndpointConfigRef(const KafkaEndpointConfig& v) : value_(std::cref(v)) {}
+  EndpointConfigRef(const NATSEndpointConfig& v) : value_(std::cref(v)) {}
   EndpointConfigRef(const CronEndpointConfig& v) : value_(std::cref(v)) {}
   EndpointConfigRef(const TemporalEndpointConfig& v) : value_(std::cref(v)) {}
   EndpointConfigRef(const CustomEndpointConfig& v) : value_(std::cref(v)) {}
@@ -438,6 +471,31 @@ inline TemporalEndpointConfig Parse(
                                     "functionInitializerGroup",
                                     "functionModule"},
                                    result.properties);
+  return result;
+}
+
+inline NATSEndpointConfig Parse(const userver::formats::yaml::Value& value,
+    userver::formats::parse::To<NATSEndpointConfig>) {
+  NATSEndpointConfig result;
+  result.id = value["id"].As<int>(result.id);
+  result.name = value["name"].As<std::string>(result.name);
+  result.type = value["type"].As<servicelib::api::DataConnectorType>(result.type);
+  result.idDataConnector = value["idDataConnector"].As<int>(result.idDataConnector);
+  result.tracingEnabled = value["tracingEnabled"].As<bool>(result.tracingEnabled);
+  result.enabled = value["enabled"].As<bool>(result.enabled);
+  result.subject = value["subject"].As<std::string>(result.subject);
+  result.queueGroup = value["queueGroup"].As<std::string>(result.queueGroup);
+  result.streamName = value["streamName"].As<std::string>(result.streamName);
+  result.durableName = value["durableName"].As<std::string>(result.durableName);
+  result.createStream = value["createStream"].As<bool>(result.createStream);
+  result.createConsumer = value["createConsumer"].As<bool>(result.createConsumer);
+  result.functionName = value["functionName"].As<std::string>(result.functionName);
+  result.functionPackage = value["functionPackage"].As<std::string>(result.functionPackage);
+  result.functionDescription = value["functionDescription"].As<std::string>(result.functionDescription);
+  result.functionInitializerGroup = value["functionInitializerGroup"].As<std::string>(result.functionInitializerGroup);
+  result.functionModule = value["functionModule"].As<std::string>(result.functionModule);
+  result.publicFunction = value["publicFunction"].As<bool>(result.publicFunction);
+  detail::ParseRemainingProperties(value, {"id","name","type","idDataConnector","tracingEnabled","enabled","subject","queueGroup","streamName","durableName","createStream","createConsumer","functionName","functionPackage","functionDescription","functionInitializerGroup","functionModule","publicFunction"}, result.properties);
   return result;
 }
 

@@ -19,9 +19,11 @@ find_package(OpenSSL REQUIRED)
 
 option(SERVICELIB_BUILD_TESTS "Build servicelib unit tests" OFF)
 option(SERVICELIB_BUILD_BENCHMARKS "Build servicelib benchmarks" OFF)
+option(SERVICELIB_ENABLE_PULSAR "Build official native Pulsar transport" OFF)
+option(SERVICELIB_ENABLE_NATS "Build native NATS Core and JetStream transport" OFF)
 option(SERVICELIB_ENABLE_CRON "Build the libcron data source" OFF)
 if(SERVICELIB_BUILD_TESTS OR SERVICELIB_BUILD_BENCHMARKS OR
-   SERVICELIB_ENABLE_CRON)
+   SERVICELIB_ENABLE_CRON OR SERVICELIB_ENABLE_NATS)
   find_package(jemalloc CONFIG QUIET)
   find_package(userver CONFIG REQUIRED COMPONENTS core grpc kafka)
 endif()
@@ -34,6 +36,27 @@ target_include_directories(servicelib INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_link_libraries(servicelib INTERFACE OpenSSL::Crypto)
+
+if(SERVICELIB_ENABLE_PULSAR)
+  find_package(userver CONFIG REQUIRED COMPONENTS core)
+  list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+  find_package(PulsarNative 4.2.0 EXACT REQUIRED)
+  add_library(servicelib_pulsar STATIC src/pulsar/client.cpp src/pulsar/admin.cpp)
+  add_library(servicelib::pulsar ALIAS servicelib_pulsar)
+  set_target_properties(servicelib_pulsar PROPERTIES EXPORT_NAME pulsar)
+  target_link_libraries(servicelib_pulsar PUBLIC servicelib userver::core PulsarNative::pulsar)
+  install(TARGETS servicelib_pulsar EXPORT servicelibTargets ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+  install(FILES cmake/FindPulsarNative.cmake DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/servicelib)
+endif()
+
+if(SERVICELIB_ENABLE_NATS)
+  find_package(cnats 3.14.0 CONFIG REQUIRED)
+  add_library(servicelib_nats STATIC src/nats/client.cpp)
+  add_library(servicelib::nats ALIAS servicelib_nats)
+  set_target_properties(servicelib_nats PROPERTIES EXPORT_NAME nats)
+  target_link_libraries(servicelib_nats PUBLIC servicelib userver::core cnats::nats_static)
+  install(TARGETS servicelib_nats EXPORT servicelibTargets ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+endif()
 
 if(SERVICELIB_ENABLE_CRON)
   find_package(libcron CONFIG REQUIRED)
@@ -81,6 +104,11 @@ if(SERVICELIB_BUILD_TESTS)
         servicelib userver::core userver::utest ${ARGN})
     add_google_tests(${target})
   endfunction()
+
+  if(SERVICELIB_ENABLE_NATS)
+    servicelib_add_test(servicelib_nats_test tests/nats_endpoints_test.cpp servicelib::nats)
+    target_compile_definitions(servicelib_nats_test PRIVATE SERVICELIB_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+  endif()
 
   servicelib_add_test(servicelib_taskpool_test
       tests/taskpool_test.cpp)

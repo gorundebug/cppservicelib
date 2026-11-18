@@ -1,0 +1,13 @@
+# Official Apache distribution. No patched fork or compatibility implementation.
+find_path(PulsarNative_INCLUDE_DIR pulsar/Client.h HINTS ${PulsarNative_ROOT} PATH_SUFFIXES include)
+find_library(PulsarNative_LIBRARY NAMES pulsar HINTS ${PulsarNative_ROOT} PATH_SUFFIXES lib lib64)
+if(PulsarNative_INCLUDE_DIR)
+  file(STRINGS "${PulsarNative_INCLUDE_DIR}/pulsar/Version.h" _pulsar_version REGEX "PULSAR_VERSION_STR ")
+  string(REGEX MATCH "[0-9]+\\.[0-9]+\\.[0-9]+" PulsarNative_VERSION "${_pulsar_version}")
+endif()
+include(FindPackageHandleStandardArgs)
+find_package_handle_standard_args(PulsarNative REQUIRED_VARS PulsarNative_INCLUDE_DIR PulsarNative_LIBRARY VERSION_VAR PulsarNative_VERSION)
+if(PulsarNative_FOUND AND NOT TARGET PulsarNative::pulsar)
+  add_library(PulsarNative::pulsar UNKNOWN IMPORTED)
+  set_target_properties(PulsarNative::pulsar PROPERTIES IMPORTED_LOCATION "${PulsarNative_LIBRARY}" INTERFACE_INCLUDE_DIRECTORIES "${PulsarNative_INCLUDE_DIR}")
+endif()

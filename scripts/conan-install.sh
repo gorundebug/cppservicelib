@@ -139,6 +139,10 @@ requirements=(
   --requires="userver/$(version userver)@gorundebug/userver"
   --requires="librdkafka/$(version librdkafka)@gorundebug/userver"
 )
+if [[ "${CPPSERVICELIB_ENABLE_NATS:-False}" == "True" ]]; then
+  requirements+=(--requires="nats-c/3.14.0@gorundebug/userver")
+  lock_args+=(--lockfile-partial)
+fi
 if [[ "${CPPSERVICELIB_ENABLE_CRON:-False}" == "True" ]]; then
   requirements+=(
     --requires="libcron/$(version libcron)@gorundebug/userver"

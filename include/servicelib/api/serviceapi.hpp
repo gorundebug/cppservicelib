@@ -94,6 +94,22 @@ enum class DataConnectorType {
   kCustom = 4,  // Custom
   kCron = 5,  // Cron
   kTemporal = 6,  // Temporal
+  kNATS = 7,  // NATS
+  kJetStream = 8,  // JetStream
+  kRabbitMQ = 9,  // RabbitMQ
+  kRedisStreams = 10,  // RedisStreams
+  kPulsar = 11,  // Pulsar
+};
+
+enum class RabbitMQQueueType {
+  kQuorum = 0,  // quorum
+  kClassic = 1,  // classic
+};
+
+enum class RabbitMQExchangeType {
+  kDirect = 0,  // direct
+  kTopic = 1,  // topic
+  kFanout = 2,  // fanout
 };
 
 enum class ProcessPattern {
@@ -153,6 +169,22 @@ enum class DataConnectorImplementation {
   kTemporalGo = 24,  // TemporalGo
   kTemporalPython = 25,  // TemporalPython
   kTemporalTypeScript = 26,  // TemporalTypeScript
+  kNatsGo = 27,  // NatsGo
+  kNatsPy = 28,  // NatsPy
+  kNatsNode = 29,  // NatsNode
+  kAsyncNats = 30,  // AsyncNats
+  kNatsC = 31,  // NatsC
+  kRabbitMQAMQPGo = 32,  // RabbitMQAMQPGo
+  kRabbitMQAMQPPython = 33,  // RabbitMQAMQPPython
+  kRabbitMQAMQPJavaScript = 34,  // RabbitMQAMQPJavaScript
+  kGoRedis = 35,  // GoRedis
+  kRedisPy = 36,  // RedisPy
+  kNodeRedis = 37,  // NodeRedis
+  kHiredis = 38,  // Hiredis
+  kPulsarGo = 39,  // PulsarGo
+  kPulsarPython = 40,  // PulsarPython
+  kPulsarNode = 41,  // PulsarNode
+  kPulsarCpp = 42,  // PulsarCpp
 };
 
 enum class KafkaSecurityProtocol {

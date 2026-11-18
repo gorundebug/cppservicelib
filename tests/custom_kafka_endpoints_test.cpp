@@ -190,7 +190,7 @@ UTEST(KafkaProducerAdapter, PreservesOwnerContext) {
   for (const bool cancelExternal : {false, true}) {
     TestEnvironment environment;
     OwnerContextKafkaClient client;
-    servicelib::datasource::kafka::detail::ProducerAdapter adapter(client, environment);
+    servicelib::datasource::kafka::detail::ProducerAdapter adapter(client, environment, "kafka", "kafka-messages");
     std::stop_source primary;
     std::stop_source external;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(1);
@@ -228,7 +228,7 @@ UTEST(KafkaProducerAdapter, PreservesOwnerContext) {
 UTEST(KafkaProducerAdapter, PreservesExpiredDeadline) {
   TestEnvironment environment;
   OwnerContextKafkaClient client;
-  servicelib::datasource::kafka::detail::ProducerAdapter adapter(client, environment);
+  servicelib::datasource::kafka::detail::ProducerAdapter adapter(client, environment, "kafka", "kafka-messages");
   auto owner = servicelib::Context{}.withDeadline(
       std::chrono::steady_clock::now() - std::chrono::seconds(1));
   bool called = false;
@@ -916,6 +916,7 @@ UTEST(KafkaDataSource, CopiesRecordAndExposesUserverCommit) {
   done.Wait();
   endpoint->stop(servicelib::Context{});
   EXPECT_EQ(observed, "events:key:payload");
+  EXPECT_EQ(static_cast<servicelib::testmetrics::TestMetrics&>(environment.getMetrics()).counter("broker_endpoint.source_observations_total", {{"protocol", "kafka"}, {"connector", "kafka"}, {"endpoint", "kafka-messages"}, {"observation", "received"}}).count(), 1);
   EXPECT_TRUE(consumer.committed.load());
 }
 
@@ -1108,3 +1109,115 @@ UTEST(KafkaAdmin, ReadsActualPartitionCountFromBrokerMetadata) {
 #include "kafka_transaction_visibility_test.hpp"
 
 #include "kafka_checkpoint_test.hpp"
+
+
+namespace {
+class FailingLaneConsumer final : public servicelib::datasource::kafka::ConsumerClient {
+ public:
+  userver::engine::SingleUseEvent finished;
+  std::atomic<int> delivered{0};
+  std::atomic<int> committed{0};
+  std::exception_ptr failure;
+  void start(servicelib::Context, servicelib::datasource::kafka::RestoreCheckpoint restore,
+             Callback callback, ErrorCallback) override {
+    (void)restore();
+    try {
+      for (int offset = 0; offset < 2; ++offset) {
+        ++delivered;
+        callback(servicelib::datasource::kafka::ConsumerMessage{
+            "key", "value", "events", 0, offset, [this] { ++committed; }});
+      }
+    } catch (...) { failure = std::current_exception(); }
+    finished.Send();
+  }
+  void stop() noexcept override {}
+};
+struct FailedRequestHandler final {
+  using State = int;
+  int mode;
+  int* ended;
+  std::stop_source* cancelled;
+  std::optional<servicelib::datasource::kafka::CheckpointOffsets> restoreCheckpoint(servicelib::MessageContext, auto&) const { return std::nullopt; }
+  int concurrency(auto&) { return mode == 4 ? -1 : 1; }
+  void onError(servicelib::MessageContext, auto&, std::exception_ptr) {}
+  servicelib::BeginResult<State> beginRequest(servicelib::MessageContext context, auto&) {
+    if (mode == 0) throw std::runtime_error("begin failed");
+    return {context.withExternalCancellation(cancelled->get_token()), 0};
+  }
+  void consumeMessage(servicelib::MessageContext, auto&, State&,
+                      const servicelib::datasource::kafka::ConsumerMessage&,
+                      servicelib::datasource::localsource::ResultContext<State, std::string, int, std::exception_ptr>) {
+    if (mode == 1) throw std::runtime_error("consume failed");
+    cancelled->request_stop();
+  }
+  std::string getMessageId(servicelib::MessageContext, auto&, State&, const int&) { return "result"; }
+  void endRequest(servicelib::MessageContext, auto&, std::exception_ptr error, State&) noexcept {
+    EXPECT_TRUE(error);
+    ++*ended;
+  }
+};
+}
+
+UTEST(KafkaDataSource, FailedRequestStopsLaneBeforeSuccessorAndFinalizesOnce) {
+  for (int mode = 0; mode < 5; ++mode) {
+    TestEnvironment environment;
+    FailingLaneConsumer consumer;
+    TestSourceInput<std::string, int> input{mode == 3};
+    int ended = 0;
+    std::stop_source cancelled;
+    auto endpoint = servicelib::datasource::kafka::Endpoint<std::string, int, FailedRequestHandler>::make(
+        environment, input, consumer, FailedRequestHandler{mode, &ended, &cancelled});
+    endpoint->start(servicelib::Context{});
+    consumer.finished.Wait();
+    endpoint->stop(servicelib::Context{});
+    EXPECT_TRUE(consumer.failure);
+    EXPECT_EQ(consumer.delivered.load(), 1);
+    EXPECT_EQ(consumer.committed.load(), 0);
+    EXPECT_EQ(ended, (mode == 0 || mode == 4) ? 0 : 1);
+  }
+}
+
+namespace {
+class HeldKafkaProducer final : public servicelib::datasink::kafka::ProducerClient {
+ public:
+  userver::engine::SingleUseEvent entered;
+  userver::engine::SingleUseEvent released;
+  bool completed = false;
+  servicelib::datasink::kafka::DeliveryResult send(std::string, std::string, std::string,
+      std::optional<std::uint32_t> partition) override {
+    entered.Send();
+    released.Wait();
+    completed = true;
+    return {partition, std::nullopt, {}};
+  }
+};
+}
+UTEST(KafkaDataSink, ExpiredStopDrainsOwnedDeliveryBeforeReportingOverrun) {
+  using namespace std::chrono_literals;
+  TestEnvironment environment;
+  HeldKafkaProducer producer;
+  int callbacks = 0;
+  TestSinkEndpointStream<std::string, int> stream{environment, 3,
+      [&](servicelib::MessageContext, servicelib::Payload<int>) { ++callbacks; }};
+  servicelib::datasink::kafka::Endpoint<std::string, int, AsyncFailingKafkaSinkHandler>
+      endpoint{stream, producer, AsyncFailingKafkaSinkHandler{}};
+  endpoint.start(servicelib::Context{});
+  endpoint.consume(servicelib::MessageContext{}, servicelib::Payload<std::string>::make("owned"));
+  producer.entered.Wait();
+  const auto expired = servicelib::Context{}.withDeadline(std::chrono::steady_clock::now() - 1ms);
+  userver::engine::SingleUseEvent stopping;
+  auto task = userver::engine::AsyncNoTracing([&] {
+    stopping.Send();
+    EXPECT_THROW(endpoint.stop(expired), std::runtime_error);
+  });
+  stopping.Wait();
+  userver::engine::SleepFor(1ms);
+  EXPECT_FALSE(task.IsFinished());
+  EXPECT_FALSE(producer.completed);
+  EXPECT_EQ(callbacks, 0);
+  producer.released.Send();
+  task.Get();
+  EXPECT_TRUE(producer.completed);
+  EXPECT_EQ(callbacks, 1);
+  EXPECT_NO_THROW(endpoint.stop(servicelib::Context{}));
+}

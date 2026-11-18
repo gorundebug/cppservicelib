@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.24)
+project(pulsar_native LANGUAGES CXX)
+set(SERVICELIB_ENABLE_PULSAR ON CACHE BOOL "" FORCE)
+set(SERVICELIB_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(USE_CCACHE OFF CACHE BOOL "" FORCE)
+add_subdirectory(../.. sdk)
+add_executable(pulsar_native native.cpp)
+target_link_libraries(pulsar_native PRIVATE servicelib::pulsar)

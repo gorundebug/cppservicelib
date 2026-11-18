@@ -192,3 +192,62 @@ UTEST(KafkaNativeTransactions, EndpointVisibility) {
 }
 
 }  // namespace native_kafka_visibility
+
+UTEST(KafkaNativeTransactions, FailedPartitionCannotBeCoveredByBatchCommit) {
+  using namespace std::chrono_literals;
+  const auto* brokers = std::getenv("SA_TEST_KAFKA_BROKERS");
+  if (!brokers) GTEST_SKIP() << "explicit disposable broker required";
+  TestEnvironment environment;
+  auto& connector = environment.config().kafkaConnector;
+  connector.brokers = brokers;
+  connector.dialTimeout = 10000;
+  auto& config = environment.config().kafkaEndpoint;
+  const auto topic = "sa-userver-failure-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+  config.topic = topic; config.consumerGroup = topic;
+  config.partitions = 2; config.replicationFactor = 1; config.createTopic = true;
+  servicelib::detail::EnsureKafkaTopic(connector, config);
+  native_kafka_visibility::VisibilityProducer producer{brokers};
+  producer.send(topic, "failed", 0);
+  producer.send(topic, "must-not-advance", 0);
+  producer.send(topic, "healthy", 1);
+  userver::kafka::impl::ConsumerConfiguration options;
+  options.group_id = topic;
+  options.rd_kafka_options["auto.offset.reset"] = "earliest";
+  options.rd_kafka_options["enable.auto.commit"] = "false";
+  userver::kafka::impl::Secret secrets; secrets.brokers = brokers;
+  auto& processor = userver::engine::current_task::GetTaskProcessor();
+  userver::kafka::impl::Consumer native{
+      "kafka-consumer-failure", {topic}, processor, processor, processor, options, secrets, {}};
+  auto scope = native.MakeConsumerScope();
+  servicelib::datasource::kafka::UserverConsumerClient consumer{scope, topic, false};
+  std::atomic<int> failures{0}, successors{0}, healthy{0};
+  consumer.start(servicelib::Context{}, [] { return std::optional<servicelib::datasource::kafka::CheckpointOffsets>{}; },
+      [&](servicelib::datasource::kafka::ConsumerMessage message) {
+        if (message.partition() == 0) {
+          if (message.offset() != 0) ++successors;
+          ++failures;
+          throw std::runtime_error("intentional native batch failure");
+        }
+        message.commit();
+        ++healthy;
+      }, [](std::exception_ptr) {});
+  const auto deadline = std::chrono::steady_clock::now() + 15s;
+  while ((!failures.load() || !healthy.load()) && std::chrono::steady_clock::now() < deadline) userver::engine::SleepFor(10ms);
+  userver::engine::SleepFor(300ms);
+  consumer.stop();
+  ASSERT_GT(failures.load(), 0);
+  ASSERT_GT(healthy.load(), 0) << "healthy partition never requested a commit";
+  EXPECT_EQ(successors.load(), 0);
+  char error[512]{};
+  auto* nativeConfig = rd_kafka_conf_new();
+  ASSERT_EQ(rd_kafka_conf_set(nativeConfig, "bootstrap.servers", brokers, error, sizeof(error)), RD_KAFKA_CONF_OK);
+  ASSERT_EQ(rd_kafka_conf_set(nativeConfig, "group.id", topic.c_str(), error, sizeof(error)), RD_KAFKA_CONF_OK);
+  std::unique_ptr<rd_kafka_t, decltype(&rd_kafka_destroy)> inspector{
+      rd_kafka_new(RD_KAFKA_CONSUMER, nativeConfig, error, sizeof(error)), rd_kafka_destroy};
+  ASSERT_TRUE(inspector) << error;
+  std::unique_ptr<rd_kafka_topic_partition_list_t, decltype(&rd_kafka_topic_partition_list_destroy)> offsets{
+      rd_kafka_topic_partition_list_new(1), rd_kafka_topic_partition_list_destroy};
+  rd_kafka_topic_partition_list_add(offsets.get(), topic.c_str(), 0);
+  ASSERT_EQ(rd_kafka_committed(inspector.get(), offsets.get(), 10000), RD_KAFKA_RESP_ERR_NO_ERROR);
+  EXPECT_LE(offsets->elems[0].offset, 0) << "failed partition was included in a later cumulative commit";
+}

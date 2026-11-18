@@ -257,7 +257,7 @@ class Endpoint final {
     }
     enabled_.store(true, std::memory_order_release);
   }
-  void stop(Context) {
+  void stop(Context context) {
     enabled_.store(false, std::memory_order_release);
     // userver::kafka::Producer::Send does not copy the key or payload.  Its
     // coroutine keeps those buffers alive until librdkafka reports delivery.
@@ -265,6 +265,11 @@ class Endpoint final {
     // broker thread is still sending them.  Stop accepting new messages and
     // drain the already accepted deliveries instead.
     tasks_.WaitAndDisposeSlow();
+    // Stock Send retains borrowed buffers until native completion. We cannot
+    // abandon that ownership safely, but an overrun must not report success.
+    if (context.cancelled()) {
+      throw std::runtime_error("Kafka producer drain exceeded its shutdown context");
+    }
   }
 
   void consume(MessageContext context, Payload<T> payload) {

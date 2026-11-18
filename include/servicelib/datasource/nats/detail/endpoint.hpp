@@ -1,0 +1,401 @@
+#pragma once
+
+#include <atomic>
+#include <cstddef>
+#include <cstdlib>
+#include <exception>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <shared_mutex>
+#include <stdexcept>
+#include <stop_token>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+#include <userver/concurrent/background_task_storage.hpp>
+#include <userver/engine/condition_variable.hpp>
+#include <userver/engine/mutex.hpp>
+#include <userver/engine/shared_mutex.hpp>
+#include <userver/engine/single_use_event.hpp>
+#include <userver/utils/uuid7.hpp>
+
+#include <servicelib/runtime/stream_tracing.hpp>
+#include <servicelib/runtime/common.hpp>
+#include <servicelib/runtime/config/dataconnector_types.hpp>
+#include <servicelib/runtime/config/endpoint_types.hpp>
+#include <servicelib/runtime/datasource.hpp>
+#include <servicelib/runtime/environment/environment.hpp>
+#include <servicelib/runtime/environment/tracing/tracing.hpp>
+#include <servicelib/runtime/store/rotatingmap.hpp>
+#include <servicelib/datasource/detail/result_context.hpp>
+
+// NATS owns its lifecycle; only the common result-correlation state is shared.
+// Done finalizes graph processing and never acknowledges a JetStream message.
+namespace servicelib::datasource::nats {
+template <typename State, typename T, typename R, typename E>
+using ResultContext = localsource::ResultContext<State, T, R, E>;
+template <typename State, typename T, typename R, typename E>
+using PendingResult = localsource::PendingResult<State, T, R, E>;
+}
+namespace servicelib::datasource::nats::detail {
+
+template <typename T, typename R, typename Handler, typename E,
+          typename Input, typename Producer>
+class EndpointState final {
+ public:
+  using State = typename Handler::State;
+  using StreamContext = SourceStreamContext<T, R, E>;
+  using Result = PendingResult<State, T, R, E>;
+  using Output = typename StreamContext::Output;
+  using ErrorOutput = typename StreamContext::ErrorOutput;
+
+  EndpointState(IServiceEnvironment& environment, int endpointId, int streamConfigId,
+                Producer& producer, Handler handler, Output output,
+                bool hasResult, std::string connectorName, std::string endpointName,
+                ErrorOutput errorOutput)
+      : environment_(environment), endpointId_(endpointId),
+        tracingEnabled_(environment.getTracing() != nullptr),
+        streamIdentity_(resolveStreamIdentity(environment, streamConfigId)),
+        endpointName_(std::move(endpointName)), producer_(producer),
+        ownedHandler_(std::move(handler)), handler_(&*ownedHandler_),
+        streamContext_(std::move(output), std::move(errorOutput)),
+        hasResult_(hasResult), pending_(std::chrono::seconds{30}),
+        metrics_(environment.getMetrics(), environment.getLogger(),
+                 std::move(connectorName), endpointName_) {}
+
+  ~EndpointState() {
+    if (started_.load(std::memory_order_acquire)) {
+      std::abort();
+    }
+  }
+
+  [[nodiscard]] int id() const noexcept { return endpointId_; }
+
+  void start(Context context) {
+    bool expected = false;
+    if (!started_.compare_exchange_strong(expected, true,
+                                          std::memory_order_acq_rel)) {
+      throw std::logic_error("NATS datasource endpoint already started");
+    }
+    requestStopSource_ = std::stop_source{};
+    context = context.withExternalCancellation(requestStopSource_.get_token());
+    stopped_ = false;
+    if (hasResult_) pending_.start(context);
+    try {
+      producer_.start(context, [this](MessageContext messageContext, Payload<Input> payload) {
+        submit(std::move(messageContext), std::move(payload));
+      }, [this](Context owner, std::exception_ptr error) {
+        handler_->onError(MessageContext{owner}, streamContext_, std::move(error));
+      });
+    } catch (...) {
+      if (hasResult_) pending_.stop(context);
+      started_.store(false, std::memory_order_release);
+      throw;
+    }
+  }
+
+  void stop(Context context) {
+    if (!started_.exchange(false, std::memory_order_acq_rel)) return;
+    // Remove broker interest first, keeping the connection alive for explicit
+    // ACKs from results already in flight. Cancel waits only after the bounded
+    // graceful interval expires.
+    try { producer_.stopAdmission(context); producer_.waitForCallbacks(context); } catch (...) {}
+    { std::lock_guard lock(concurrencyMutex_); stopped_ = true; concurrencyCv_.NotifyAll(); }
+    requestStopSource_.request_stop();
+    try {
+      producer_.stop(context);
+    } catch (...) {
+      // Continue joining endpoint work; shutdown safety must not depend on a
+      // user producer honoring its noexcept-style stop contract.
+    }
+    tasks_.CancelAndWait();
+    if (hasResult_) pending_.stop(std::move(context));
+  }
+
+  // Result stream entry point. GetMessageId and callbacks may execute
+  // concurrently, as in Go; handler State must synchronize shared access.
+  void consumeResult(MessageContext context, Payload<R> payload) {
+    if (!hasResult_) return;
+    if (context.streamId().empty()) {
+      metrics_.missingStreamId();
+      return;
+    }
+    const auto found = pending_.get(std::string{context.streamId()});
+    if (!found) {
+      metrics_.lateResult(context.streamId());
+      return;
+    }
+    const auto& result = *found;
+    std::shared_lock lifetimeLock(result->lifetimeMutex);
+    const auto current = pending_.get(std::string{context.streamId()});
+    if (!current || *current != result) {
+      metrics_.lateResult(context.streamId());
+      if (auto* traceSpan = result->span.get()) traceSpan->addEvent("late_result");
+      return;
+    }
+    const auto messageId = handler_->getMessageId(context, streamContext_,
+                                                 result->state, payload.get());
+    std::shared_ptr<typename Result::Callback> callback;
+    {
+      std::lock_guard lock(result->callbacksMutex);
+      const auto it = result->callbacks.find(messageId);
+      if (it != result->callbacks.end()) callback = it->second;
+    }
+    if (!callback || !*callback) {
+      metrics_.unknownMessageId(context.streamId(), messageId);
+      if (auto* traceSpan = result->span.get()) traceSpan->addEvent("unknown_message_id",
+                         {tracing::Attribute::String("message_id", messageId)});
+      return;
+    }
+    if ((*callback)(context, streamContext_, result->state, payload.get())) {
+      bool duplicate = false;
+      {
+        std::lock_guard lock(result->callbacksMutex);
+        duplicate = result->callbacks.erase(messageId) == 0;
+      }
+      if (duplicate) {
+        metrics_.duplicateMessageId(context.streamId(), messageId);
+        if (auto* traceSpan = 
+            result->span.get()) traceSpan->addEvent("duplicate_message_id",
+            {tracing::Attribute::String("message_id", messageId)});
+      }
+    }
+    if (auto* traceSpan = result->span.get()) traceSpan->addEvent("result_consumed",
+                       {tracing::Attribute::String("message_id", messageId)});
+  }
+
+ private:
+  void submit(MessageContext context, Payload<Input> payload) {
+    if (!acquire(context)) return;
+    // Native ingress owns one serial endpoint lane, including result waiting.
+    struct Release final {
+      EndpointState* endpoint;
+      ~Release() { endpoint->release(); }
+    } release{this};
+    process(std::move(context), std::move(payload));
+  }
+
+  bool acquire(const Context& context) {
+    const auto wake = [this] {
+      std::lock_guard lock(concurrencyMutex_);
+      concurrencyCv_.NotifyAll();
+    };
+    std::stop_callback primary{context.stopToken(), wake};
+    std::vector<std::unique_ptr<std::stop_callback<decltype(wake)>>> cancellations;
+    for (const auto& token : context.externalStopTokens()) {
+      cancellations.push_back(std::make_unique<std::stop_callback<decltype(wake)>>(token, wake));
+    }
+    std::unique_lock lock(concurrencyMutex_);
+    for (;;) {
+      if (stopped_ || context.cancelled()) return false;
+      constexpr int limit = 1;
+      if (limit <= 0 || active_ < static_cast<std::size_t>(limit)) {
+        ++active_;
+        return true;
+      }
+      static_cast<void>(concurrencyCv_.Wait(lock));
+    }
+  }
+
+  void release() noexcept {
+    std::lock_guard lock(concurrencyMutex_);
+    --active_;
+    concurrencyCv_.NotifyAll();
+  }
+
+  void process(MessageContext context, Payload<Input> payload) {
+    if (tracingEnabled_) {
+      context = ApplyDataSourceEndpointTracing(
+          std::move(context), environment_, endpointId_);
+    }
+    std::shared_ptr<tracing::Tracer> tracer;
+    if (tracingEnabled_ && tracing::SamplingEnabled(context)) {
+      if (auto* tracingEngine = environment_.getTracing()) {
+        tracer = tracingEngine->tracer(environment_.getServiceName());
+      }
+    }
+    tracing::ActiveSpan startedSpan;
+    if (tracer) {
+      startedSpan = tracing::StartSpanInPlace(
+          context, tracer.get(), "nats.input",
+          {
+              tracing::Attribute::String("stream", streamIdentity_.name),
+            tracing::Attribute::String("pipeline", streamIdentity_.pipeline),
+            tracing::Attribute::String("component", streamIdentity_.component),
+              tracing::Attribute::String("endpoint", endpointName_),
+          });
+    }
+    std::optional<BeginResult<State>> begin;
+    try {
+      begin.emplace(handler_->beginRequest(context, streamContext_));
+    } catch (...) {
+      const auto message = tracing::ExceptionMessage(std::current_exception());
+      if (auto* traceSpan = startedSpan.span()) tracing::SpanError(traceSpan, message);
+      if (auto* traceSpan = startedSpan.span()) traceSpan->addEvent("begin_request.error",
+                         {tracing::Attribute::String("error", message)});
+      metrics_.beginRequestFailed(message);
+      return;
+    }
+    if (auto* traceSpan = startedSpan.span()) traceSpan->addEvent("begin_request");
+    context = std::move(begin->context);
+    if (context.streamId().empty()) {
+      context = std::move(context).withStreamId(
+          userver::utils::generators::GenerateUuidV7());
+    }
+    const std::string streamId{context.streamId()};
+    if (startedSpan.span()) {
+      tracing::SpanAttrs(
+          startedSpan.span(),
+          {
+              tracing::Attribute::String("stream_id", streamId),
+              tracing::Attribute::Bool("has_result", hasResult_),
+          });
+    }
+    auto result = std::make_shared<Result>(std::move(begin->state),
+                                           startedSpan.sharedSpan());
+    const auto startedAt = metrics_.requestStart();
+    std::exception_ptr error;
+    bool resultWaitFailed = false;
+    try {
+      if (hasResult_) {
+        pending_.set(streamId, result);
+        metrics_.pendingAdd(streamId);
+      }
+      try {
+        handler_->consumeMessage(context, streamContext_, result->state,
+                                payload.get(),
+                                ResultContext<State, T, R, E>{result});
+      } catch (...) {
+        if (auto* traceSpan = startedSpan.span()) {
+          traceSpan->addEvent(
+              "consume_message.error",
+              {tracing::Attribute::String(
+                  "error", tracing::ExceptionMessage(std::current_exception()))});
+        }
+        throw;
+      }
+      if (auto* traceSpan = startedSpan.span()) traceSpan->addEvent("consume_message");
+      if (hasResult_) {
+        try {
+          std::stop_callback cancellation{
+              context.stopToken(), [result] {
+                bool expected = false;
+                if (result->wakeSent.compare_exchange_strong(
+                        expected, true, std::memory_order_acq_rel)) {
+                  result->done.Send();
+                }
+              }};
+          const auto wakeExternal = [result] {
+            bool expected = false;
+            if (result->wakeSent.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+              result->done.Send();
+            }
+          };
+          std::vector<std::unique_ptr<std::stop_callback<decltype(wakeExternal)>>> externalCancellations;
+          for (const auto& token : context.externalStopTokens()) {
+            externalCancellations.push_back(std::make_unique<std::stop_callback<decltype(wakeExternal)>>(token, wakeExternal));
+          }
+          std::stop_callback endpointCancellation{
+              requestStopSource_.get_token(), [result] {
+                bool expected = false;
+                if (result->wakeSent.compare_exchange_strong(
+                        expected, true, std::memory_order_acq_rel)) {
+                  result->done.Send();
+                }
+              }};
+          if (context.deadline()) {
+            const auto status = result->done.WaitUntil(
+                userver::engine::Deadline::FromTimePoint(*context.deadline()));
+            if (status != userver::engine::FutureStatus::kReady) {
+              bool expected = false;
+              if (!result->wakeSent.compare_exchange_strong(
+                      expected, true, std::memory_order_acq_rel)) {
+                // A concurrent sender won the wake-up race. Complete its Send
+                // before allowing SingleUseEvent to be destroyed.
+                result->done.WaitNonCancellable();
+              }
+              throw std::runtime_error(
+                  "NATS datasource result wait timeout");
+            }
+          } else {
+            result->done.Wait();
+          }
+          if (auto* traceSpan = startedSpan.span()) traceSpan->addEvent("done_received");
+          if (context.cancelled() || requestStopSource_.stop_requested()) {
+            throw std::runtime_error("NATS datasource request cancelled");
+          }
+        } catch (...) {
+          resultWaitFailed = true;
+          throw;
+        }
+      }
+    } catch (...) {
+      error = std::current_exception();
+      if (!resultWaitFailed) {
+        if (auto* traceSpan = startedSpan.span()) {
+          tracing::SpanError(traceSpan, tracing::ExceptionMessage(error));
+        }
+      }
+    }
+    std::unique_lock lifetimeLock(result->lifetimeMutex);
+    if (resultWaitFailed &&
+        result->completed.load(std::memory_order_acquire)) {
+      error = nullptr;
+      if (auto* traceSpan = startedSpan.span()) traceSpan->addEvent("done_received");
+    } else if (resultWaitFailed) {
+      if (auto* traceSpan = startedSpan.span()) {
+        const auto message = tracing::ExceptionMessage(error);
+        tracing::SpanError(traceSpan, message);
+        traceSpan->addEvent(
+            "context_cancelled",
+            {tracing::Attribute::String("error", message)});
+      }
+    }
+    if (hasResult_) {
+      static_cast<void>(pending_.pop(streamId));
+      metrics_.pendingRemove(streamId);
+    }
+    try {
+      handler_->endRequest(context, streamContext_, error, result->state);
+    } catch (...) {
+      // endRequest is noexcept by contract.
+    }
+    metrics_.requestEnd(startedAt, error);
+  }
+
+  static StreamTraceIdentity resolveStreamIdentity(
+      const IServiceEnvironment& environment, int streamConfigId) {
+    const auto runtime = environment.getRuntimeConfigSnapshot();
+    if (!runtime || streamConfigId == 0) return {};
+    const auto stream = runtime->GetStreamConfigByID(streamConfigId);
+    return stream ? StreamTraceIdentity{stream->GetName(), stream->GetPipeline(), stream->GetComponent()}
+                  : StreamTraceIdentity{};
+  }
+
+  IServiceEnvironment& environment_;
+  int endpointId_;
+  bool tracingEnabled_{};
+  StreamTraceIdentity streamIdentity_;
+  std::string endpointName_;
+  Producer& producer_;
+  std::optional<Handler> ownedHandler_;
+  Handler* handler_;
+  StreamContext streamContext_;
+  bool hasResult_;
+  store::RotatingMap<std::string, std::shared_ptr<Result>> pending_;
+  DataSourceEndpointMetrics metrics_;
+  userver::engine::Mutex concurrencyMutex_;
+  userver::engine::ConditionVariable concurrencyCv_;
+  std::size_t active_{0};
+  bool stopped_{true};
+  std::atomic<bool> started_{false};
+  std::stop_source requestStopSource_;
+  // Last: all detached work is joined before captured endpoint fields die.
+  userver::concurrent::BackgroundTaskStorage tasks_;
+};
+
+}  // namespace servicelib::datasource::nats::detail

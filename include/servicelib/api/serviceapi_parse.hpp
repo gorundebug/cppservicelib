@@ -147,12 +147,40 @@ constexpr userver::utils::TrivialBiMap kDataConnectorTypeMap = [](auto selector)
       .Case("Kafka", DataConnectorType::kKafka)
       .Case("Custom", DataConnectorType::kCustom)
       .Case("Cron", DataConnectorType::kCron)
-      .Case("Temporal", DataConnectorType::kTemporal);
+      .Case("Temporal", DataConnectorType::kTemporal)
+      .Case("NATS", DataConnectorType::kNATS)
+      .Case("JetStream", DataConnectorType::kJetStream)
+      .Case("RabbitMQ", DataConnectorType::kRabbitMQ)
+      .Case("RedisStreams", DataConnectorType::kRedisStreams)
+      .Case("Pulsar", DataConnectorType::kPulsar);
 };
 
 inline DataConnectorType Parse(const userver::formats::yaml::Value& value,
                     userver::formats::parse::To<DataConnectorType>) {
   return userver::utils::ParseFromValueString(value, kDataConnectorTypeMap);
+}
+
+constexpr userver::utils::TrivialBiMap kRabbitMQQueueTypeMap = [](auto selector) {
+  return selector()
+      .Case("quorum", RabbitMQQueueType::kQuorum)
+      .Case("classic", RabbitMQQueueType::kClassic);
+};
+
+inline RabbitMQQueueType Parse(const userver::formats::yaml::Value& value,
+                    userver::formats::parse::To<RabbitMQQueueType>) {
+  return userver::utils::ParseFromValueString(value, kRabbitMQQueueTypeMap);
+}
+
+constexpr userver::utils::TrivialBiMap kRabbitMQExchangeTypeMap = [](auto selector) {
+  return selector()
+      .Case("direct", RabbitMQExchangeType::kDirect)
+      .Case("topic", RabbitMQExchangeType::kTopic)
+      .Case("fanout", RabbitMQExchangeType::kFanout);
+};
+
+inline RabbitMQExchangeType Parse(const userver::formats::yaml::Value& value,
+                    userver::formats::parse::To<RabbitMQExchangeType>) {
+  return userver::utils::ParseFromValueString(value, kRabbitMQExchangeTypeMap);
 }
 
 constexpr userver::utils::TrivialBiMap kProcessPatternMap = [](auto selector) {
@@ -236,7 +264,23 @@ constexpr userver::utils::TrivialBiMap kDataConnectorImplementationMap = [](auto
       .Case("cpp/libcron", DataConnectorImplementation::kCppLibcron)
       .Case("temporal/go", DataConnectorImplementation::kTemporalGo)
       .Case("temporal/python", DataConnectorImplementation::kTemporalPython)
-      .Case("temporal/typescript", DataConnectorImplementation::kTemporalTypeScript);
+      .Case("temporal/typescript", DataConnectorImplementation::kTemporalTypeScript)
+      .Case("nats.go", DataConnectorImplementation::kNatsGo)
+      .Case("nats.py", DataConnectorImplementation::kNatsPy)
+      .Case("@nats-io/transport-node", DataConnectorImplementation::kNatsNode)
+      .Case("async-nats", DataConnectorImplementation::kAsyncNats)
+      .Case("nats.c", DataConnectorImplementation::kNatsC)
+      .Case("rabbitmq-amqp-go-client", DataConnectorImplementation::kRabbitMQAMQPGo)
+      .Case("rabbitmq-amqp-python-client", DataConnectorImplementation::kRabbitMQAMQPPython)
+      .Case("rabbitmq-amqp-js-client", DataConnectorImplementation::kRabbitMQAMQPJavaScript)
+      .Case("go-redis", DataConnectorImplementation::kGoRedis)
+      .Case("redis-py", DataConnectorImplementation::kRedisPy)
+      .Case("node-redis", DataConnectorImplementation::kNodeRedis)
+      .Case("hiredis", DataConnectorImplementation::kHiredis)
+      .Case("pulsar-client-go", DataConnectorImplementation::kPulsarGo)
+      .Case("pulsar-client-python", DataConnectorImplementation::kPulsarPython)
+      .Case("pulsar-client-node", DataConnectorImplementation::kPulsarNode)
+      .Case("pulsar-client-cpp", DataConnectorImplementation::kPulsarCpp);
 };
 
 inline DataConnectorImplementation Parse(const userver::formats::yaml::Value& value,

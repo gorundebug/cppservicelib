@@ -66,6 +66,7 @@ EOF
   conan lock create --requires="userver/$(version userver)@gorundebug/userver" \
     --requires="librdkafka/$(version librdkafka)@gorundebug/userver" \
     --requires="libcron/$(version libcron)@gorundebug/userver" \
+    --requires="nats-c/3.14.0@gorundebug/userver" \
     --profile:host "$effective_profile" \
     --profile:build "$effective_profile" \
     -s:h build_type=Release \

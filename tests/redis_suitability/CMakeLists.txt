@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.24)
+project(redis_suitability LANGUAGES CXX)
+find_package(userver REQUIRED COMPONENTS core redis)
+add_executable(redis_suitability probe.cpp)
+target_compile_features(redis_suitability PRIVATE cxx_std_20)
+target_link_libraries(redis_suitability PRIVATE userver::core userver::redis)

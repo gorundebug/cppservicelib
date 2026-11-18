@@ -180,7 +180,7 @@ class EndpointState final {
 
  private:
   void submit(MessageContext context, Payload<Input> payload) {
-    if (!acquire(context)) return;
+    if (!acquire(context)) throw std::runtime_error("Kafka request admission cancelled");
     // Finish this message before returning to the Kafka partition consumer.
     struct Release final {
       EndpointState* endpoint;
@@ -203,7 +203,8 @@ class EndpointState final {
     for (;;) {
       if (stopped_ || context.cancelled()) return false;
       const auto limit = handler_->concurrency(streamContext_);
-      if (limit <= 0 || active_ < static_cast<std::size_t>(limit)) {
+      if (limit < 0) throw std::invalid_argument("Kafka concurrency must be non-negative");
+      if (limit == 0 || active_ < static_cast<std::size_t>(limit)) {
         ++active_;
         return true;
       }
@@ -248,7 +249,7 @@ class EndpointState final {
       if (auto* traceSpan = startedSpan.span()) traceSpan->addEvent("begin_request.error",
                          {tracing::Attribute::String("error", message)});
       metrics_.beginRequestFailed(message);
-      return;
+      throw;
     }
     if (auto* traceSpan = startedSpan.span()) traceSpan->addEvent("begin_request");
     context = std::move(begin->context);
@@ -289,6 +290,9 @@ class EndpointState final {
         throw;
       }
       if (auto* traceSpan = startedSpan.span()) traceSpan->addEvent("consume_message");
+      if (!hasResult_ && (context.cancelled() || requestStopSource_.stop_requested())) {
+        throw std::runtime_error("Kafka datasource request cancelled");
+      }
       if (hasResult_) {
         try {
           std::stop_callback cancellation{
@@ -375,6 +379,8 @@ class EndpointState final {
       // endRequest is noexcept by contract.
     }
     metrics_.requestEnd(startedAt, error);
+    // The native batch must see failure before deciding whether to commit.
+    if (error) std::rethrow_exception(error);
   }
 
   static StreamTraceIdentity resolveStreamIdentity(

@@ -1,0 +1,36 @@
+components_manager:
+    components:
+        probe:
+            path: /probe
+            method: POST
+            task_processor: main-task-processor
+        redis:
+            groups:
+              - {config_name: direct, db: control, sharding_strategy: RedisStandalone}
+              - {config_name: direct, db: reader, sharding_strategy: RedisStandalone}
+              - {config_name: fault, db: fault, sharding_strategy: RedisStandalone}
+              - {config_name: tls, db: tls, sharding_strategy: RedisStandalone}
+            subscribe_groups: []
+            thread_pools:
+                redis_thread_pool_size: 1
+                sentinel_thread_pool_size: 1
+        secdist: {}
+        default-secdist-provider:
+            config: /nonexistent
+            missing-ok: true
+            environment-secrets-key: SECDIST_CONFIG
+        testsuite-support: {}
+        server:
+            listener:
+                port: 18098
+                task_processor: main-task-processor
+        logging:
+            fs-task-processor: fs-task-processor
+            loggers:
+                default: {file_path: '@stderr', level: warning, overflow_behavior: discard}
+        dns-client:
+            fs-task-processor: fs-task-processor
+    task_processors:
+        main-task-processor: {worker_threads: 1}
+        fs-task-processor: {worker_threads: 1}
+    default_task_processor: main-task-processor
