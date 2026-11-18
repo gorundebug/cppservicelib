@@ -1,4 +1,8 @@
 {
+  "archive.apache.org": {
+    "repository": "apache-archive",
+    "upstream": "https://archive.apache.org"
+  },
   "archives.boost.io": {
     "repository": "conan-source-archives-boost",
     "upstream": "https://archives.boost.io"
