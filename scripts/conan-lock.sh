@@ -63,6 +63,13 @@ yaml-cpp/*: yaml-cpp/$(version yaml-cpp)
 [replace_tool_requires]
 protobuf/*: protobuf/$(version protobuf)
 EOF
+  # Extend the existing graph for optional transports without updating unrelated
+  # dependency versions or recipe revisions.
+  existing_lock="$lock_dir/$(basename "$profile").lock"
+  lock_args=()
+  if [[ -f "$existing_lock" ]]; then
+    lock_args=(--lockfile "$existing_lock" --lockfile-partial)
+  fi
   conan lock create --requires="userver/$(version userver)@gorundebug/userver" \
     --requires="librdkafka/$(version librdkafka)@gorundebug/userver" \
     --requires="libcron/$(version libcron)@gorundebug/userver" \
@@ -72,12 +79,13 @@ EOF
     -s:h build_type=Release \
     -s:b build_type=Release \
     -o "userver/*:with_mongodb=False" \
-    -o "userver/*:with_postgresql=False" \
+    -o "userver/*:with_postgresql=True" \
+    -o "userver/*:with_postgresql_extra=True" \
     -o "userver/*:with_redis=False" \
     -o "userver/*:with_clickhouse=False" \
     -o "userver/*:with_rabbitmq=False" \
     -o "userver/*:with_sqlite=False" \
-    -o "userver/*:with_s3api=False" \
+    -o "userver/*:with_s3api=True" \
     -o "userver/*:with_easy=False" \
     -o "userver/*:with_grpc=True" \
     -o "userver/*:with_kafka=True" \
@@ -88,5 +96,6 @@ EOF
     "${userver_package_args[@]}" \
     -o:h "openssl/*:no_engine=False" \
     -o:b "openssl/*:no_engine=False" \
-    --lockfile-out "$lock_dir/$(basename "$profile").lock"
+    "${lock_args[@]}" \
+    --lockfile-out "$existing_lock"
 done

@@ -16,6 +16,7 @@
 #include <servicelib/runtime/caller.hpp>
 #include <servicelib/runtime/config/stream_types.hpp>
 #include <servicelib/runtime/datasink.hpp>
+#include <servicelib/runtime/query.hpp>
 #include <servicelib/runtime/detail/storage.hpp>
 #include <servicelib/runtime/serde/serde.hpp>
 #include <servicelib/runtime/store/hashmap.hpp>
@@ -69,6 +70,7 @@ class Stream : public StreamBase, public virtual StreamConsumer<_Tp> {
 #include <servicelib/operators/multijoin.inl>
 #include <servicelib/operators/process.inl>
 #include <servicelib/operators/sink.inl>
+#include <servicelib/operators/query.inl>
 #include <servicelib/operators/split.inl>
 
  private:
@@ -409,6 +411,15 @@ class Stream : public StreamBase, public virtual StreamConsumer<_Tp> {
                       StreamFunction<SinkFunction, _FCtx> f)
       -> SinkWithResult<R, E, SinkFunction>& {
     return setConsumer(SinkWithResult<R, E, SinkFunction>::make(
+        cfg, this->serde_, this->env_, std::move(f)));
+  }
+
+  template <typename R, typename E, typename QueryFunction, typename _FCtx>
+  auto query(const servicelib::config::QueryStreamConfig& cfg,
+                      const StreamType<R>&, const StreamType<E>&,
+                      StreamFunction<QueryFunction, _FCtx> f)
+      -> Query<R, E, QueryFunction>& {
+    return setConsumer(Query<R, E, QueryFunction>::make(
         cfg, this->serde_, this->env_, std::move(f)));
   }
 

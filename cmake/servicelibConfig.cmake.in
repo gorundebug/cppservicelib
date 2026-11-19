@@ -2,6 +2,13 @@
 
 include(CMakeFindDependencyMacro)
 find_dependency(OpenSSL)
+if(@SERVICELIB_ENABLE_S3@)
+  find_dependency(userver CONFIG COMPONENTS s3api)
+  find_dependency(pugixml)
+endif()
+if(@SERVICELIB_ENABLE_POSTGRESQL@)
+  find_dependency(userver CONFIG COMPONENTS postgresql)
+endif()
 if(@SERVICELIB_ENABLE_CRON@)
   find_dependency(userver CONFIG COMPONENTS core)
   find_dependency(libcron CONFIG)

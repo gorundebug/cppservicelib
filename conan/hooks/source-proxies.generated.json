@@ -27,6 +27,10 @@
     "repository": "conan-source-gnu-ftp",
     "upstream": "https://ftp.gnu.org"
   },
+  "ftp.postgresql.org": {
+    "repository": "conan-source-postgresql",
+    "upstream": "https://ftp.postgresql.org"
+  },
   "ftpmirror.gnu.org": {
     "repository": "conan-source-gnu-mirror",
     "upstream": "https://ftpmirror.gnu.org"

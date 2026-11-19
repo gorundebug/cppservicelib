@@ -46,6 +46,7 @@ enum class TransformationType {
   kDelay = 16,  // Delay
   kWhen = 17,  // When
   kSubStream = 18,  // SubStream
+  kQuery = 19,  // Query
 };
 
 enum class JoinType {
@@ -99,6 +100,14 @@ enum class DataConnectorType {
   kRabbitMQ = 9,  // RabbitMQ
   kRedisStreams = 10,  // RedisStreams
   kPulsar = 11,  // Pulsar
+  kPostgreSQLBun = 12,  // PostgreSQLBun
+  kPostgreSQLKysely = 13,  // PostgreSQLKysely
+  kPostgreSQLSQLAlchemy = 14,  // PostgreSQLSQLAlchemy
+  kPostgreSQLSQLx = 15,  // PostgreSQLSQLx
+  kPostgreSQLUserver = 16,  // PostgreSQLUserver
+  kPostgreSQLLibpq = 17,  // PostgreSQLLibpq
+  kS3AWS = 18,  // S3AWS
+  kS3Userver = 19,  // S3Userver
 };
 
 enum class RabbitMQQueueType {
@@ -185,6 +194,15 @@ enum class DataConnectorImplementation {
   kPulsarPython = 40,  // PulsarPython
   kPulsarNode = 41,  // PulsarNode
   kPulsarCpp = 42,  // PulsarCpp
+  kGoBun = 43,  // GoBun
+  kPythonSQLAlchemy = 44,  // PythonSQLAlchemy
+  kNodeKysely = 45,  // NodeKysely
+  kRustSQLx = 46,  // RustSQLx
+  kGoAWS = 47,  // GoAWS
+  kNodeAWS = 48,  // NodeAWS
+  kPythonAiobotocore = 49,  // PythonAiobotocore
+  kUserverPostgreSQL = 50,  // UserverPostgreSQL
+  kLibpq = 51,  // Libpq
 };
 
 enum class KafkaSecurityProtocol {

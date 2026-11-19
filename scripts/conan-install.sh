@@ -14,9 +14,16 @@ install -m 0644 "$root/conan/hooks/hook_source_proxy.py" \
   "$conan_home/extensions/hooks/hook_servicegen_source_proxy.py"
 install -m 0644 "$root/conan/hooks/source-proxies.generated.json" \
   "$conan_home/extensions/hooks/source-proxies.generated.json"
-userver_dir="${USERVER_SOURCE_DIR:-${SERVICELIB_USERVER_SOURCE_DIR:-/opt/userver}}"
 build_type=${1:-Release}
 output_dir=${2:-$root/build/conan-${build_type,,}}
+userver_dir="${USERVER_SOURCE_DIR:-${SERVICELIB_USERVER_SOURCE_DIR:-/opt/userver}}"
+# Native pq-extra and its version probe must share one PostgreSQL installation.
+if [[ "${CPPSERVICELIB_ENABLE_POSTGRESQL:-False}" == "True" ]]; then
+  python3 "$root/scripts/query-postgresql-native.py" "$userver_dir" "$build_type" "$root" "$output_dir"
+  while IFS= read -r native_conf; do
+    userver_package_args+=(-c:h "$native_conf")
+  done < "$output_dir/native-postgresql.conan-args"
+fi
 profile=${CPPSERVICELIB_CONAN_PROFILE:-}
 extra_args=("${@:3}")
 network_retry_args=(
@@ -161,12 +168,13 @@ fi
     -s:h "build_type=$build_type" \
     -s:b "build_type=$build_type" \
     -o "userver/*:with_mongodb=False" \
-    -o "userver/*:with_postgresql=False" \
+    -o "userver/*:with_postgresql=${CPPSERVICELIB_ENABLE_POSTGRESQL:-False}" \
+    -o "userver/*:with_postgresql_extra=${CPPSERVICELIB_ENABLE_POSTGRESQL:-False}" \
     -o "userver/*:with_redis=False" \
     -o "userver/*:with_clickhouse=False" \
     -o "userver/*:with_rabbitmq=False" \
     -o "userver/*:with_sqlite=False" \
-    -o "userver/*:with_s3api=False" \
+    -o "userver/*:with_s3api=${CPPSERVICELIB_ENABLE_S3:-False}" \
     -o "userver/*:with_easy=False" \
     -o "userver/*:with_grpc=True" \
     -o "userver/*:with_kafka=True" \

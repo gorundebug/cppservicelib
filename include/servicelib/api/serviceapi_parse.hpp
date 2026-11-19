@@ -69,7 +69,8 @@ constexpr userver::utils::TrivialBiMap kTransformationTypeMap = [](auto selector
       .Case("Error", TransformationType::kError)
       .Case("Delay", TransformationType::kDelay)
       .Case("When", TransformationType::kWhen)
-      .Case("SubStream", TransformationType::kSubStream);
+      .Case("SubStream", TransformationType::kSubStream)
+      .Case("Query", TransformationType::kQuery);
 };
 
 inline TransformationType Parse(const userver::formats::yaml::Value& value,
@@ -152,7 +153,15 @@ constexpr userver::utils::TrivialBiMap kDataConnectorTypeMap = [](auto selector)
       .Case("JetStream", DataConnectorType::kJetStream)
       .Case("RabbitMQ", DataConnectorType::kRabbitMQ)
       .Case("RedisStreams", DataConnectorType::kRedisStreams)
-      .Case("Pulsar", DataConnectorType::kPulsar);
+      .Case("Pulsar", DataConnectorType::kPulsar)
+      .Case("PostgreSQLBun", DataConnectorType::kPostgreSQLBun)
+      .Case("PostgreSQLKysely", DataConnectorType::kPostgreSQLKysely)
+      .Case("PostgreSQLSQLAlchemy", DataConnectorType::kPostgreSQLSQLAlchemy)
+      .Case("PostgreSQLSQLx", DataConnectorType::kPostgreSQLSQLx)
+      .Case("PostgreSQLUserver", DataConnectorType::kPostgreSQLUserver)
+      .Case("PostgreSQLLibpq", DataConnectorType::kPostgreSQLLibpq)
+      .Case("S3AWS", DataConnectorType::kS3AWS)
+      .Case("S3Userver", DataConnectorType::kS3Userver);
 };
 
 inline DataConnectorType Parse(const userver::formats::yaml::Value& value,
@@ -280,7 +289,16 @@ constexpr userver::utils::TrivialBiMap kDataConnectorImplementationMap = [](auto
       .Case("pulsar-client-go", DataConnectorImplementation::kPulsarGo)
       .Case("pulsar-client-python", DataConnectorImplementation::kPulsarPython)
       .Case("pulsar-client-node", DataConnectorImplementation::kPulsarNode)
-      .Case("pulsar-client-cpp", DataConnectorImplementation::kPulsarCpp);
+      .Case("pulsar-client-cpp", DataConnectorImplementation::kPulsarCpp)
+      .Case("go/bun", DataConnectorImplementation::kGoBun)
+      .Case("python/sqlalchemy", DataConnectorImplementation::kPythonSQLAlchemy)
+      .Case("node/kysely", DataConnectorImplementation::kNodeKysely)
+      .Case("rust/sqlx", DataConnectorImplementation::kRustSQLx)
+      .Case("go/aws", DataConnectorImplementation::kGoAWS)
+      .Case("node/aws", DataConnectorImplementation::kNodeAWS)
+      .Case("python/aiobotocore", DataConnectorImplementation::kPythonAiobotocore)
+      .Case("userver/postgresql", DataConnectorImplementation::kUserverPostgreSQL)
+      .Case("libpq", DataConnectorImplementation::kLibpq);
 };
 
 inline DataConnectorImplementation Parse(const userver::formats::yaml::Value& value,

@@ -22,6 +22,8 @@ option(SERVICELIB_BUILD_BENCHMARKS "Build servicelib benchmarks" OFF)
 option(SERVICELIB_ENABLE_PULSAR "Build official native Pulsar transport" OFF)
 option(SERVICELIB_ENABLE_NATS "Build native NATS Core and JetStream transport" OFF)
 option(SERVICELIB_ENABLE_CRON "Build the libcron data source" OFF)
+option(SERVICELIB_ENABLE_POSTGRESQL "Enable native userver PostgreSQL Query" OFF)
+option(SERVICELIB_ENABLE_S3 "Enable native userver S3 Query" OFF)
 if(SERVICELIB_BUILD_TESTS OR SERVICELIB_BUILD_BENCHMARKS OR
    SERVICELIB_ENABLE_CRON OR SERVICELIB_ENABLE_NATS)
   find_package(jemalloc CONFIG QUIET)
@@ -36,6 +38,25 @@ target_include_directories(servicelib INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_link_libraries(servicelib INTERFACE OpenSSL::Crypto)
+
+if(SERVICELIB_ENABLE_S3)
+  find_package(userver CONFIG REQUIRED COMPONENTS s3api)
+  find_package(pugixml REQUIRED)
+  add_library(servicelib_s3 INTERFACE)
+  add_library(servicelib::s3 ALIAS servicelib_s3)
+  set_target_properties(servicelib_s3 PROPERTIES EXPORT_NAME s3)
+  target_link_libraries(servicelib_s3 INTERFACE servicelib userver::s3api pugixml::pugixml)
+  install(TARGETS servicelib_s3 EXPORT servicelibTargets)
+endif()
+
+if(SERVICELIB_ENABLE_POSTGRESQL)
+  find_package(userver CONFIG REQUIRED COMPONENTS postgresql)
+  add_library(servicelib_postgresql INTERFACE)
+  add_library(servicelib::postgresql ALIAS servicelib_postgresql)
+  set_target_properties(servicelib_postgresql PROPERTIES EXPORT_NAME postgresql)
+  target_link_libraries(servicelib_postgresql INTERFACE servicelib userver::postgresql)
+  install(TARGETS servicelib_postgresql EXPORT servicelibTargets)
+endif()
 
 if(SERVICELIB_ENABLE_PULSAR)
   find_package(userver CONFIG REQUIRED COMPONENTS core)
@@ -120,6 +141,24 @@ if(SERVICELIB_BUILD_TESTS)
       tests/serviceapp_test.cpp)
   servicelib_add_test(servicelib_context_graph_drain_test
       tests/context_graph_drain_test.cpp)
+  servicelib_add_test(servicelib_query_request_task_test
+      tests/query_request_task_test.cpp)
+  servicelib_add_test(servicelib_query_metrics_test
+      tests/query_metrics_test.cpp)
+  servicelib_add_test(servicelib_query_config_test
+      tests/query_config_test.cpp)
+  servicelib_add_test(servicelib_query_status_test
+      tests/query_status_test.cpp)
+  if(SERVICELIB_ENABLE_S3)
+    servicelib_add_test(servicelib_query_s3_list_page_test tests/query_s3_list_page_test.cpp)
+    target_link_libraries(servicelib_query_s3_list_page_test PRIVATE servicelib::s3)
+    add_library(servicelib_query_s3_compile OBJECT tests/query_s3_compile.cpp)
+    target_link_libraries(servicelib_query_s3_compile PRIVATE servicelib::s3)
+  endif()
+  if(SERVICELIB_ENABLE_POSTGRESQL)
+    add_library(servicelib_query_postgres_compile OBJECT tests/query_postgres_compile.cpp)
+    target_link_libraries(servicelib_query_postgres_compile PRIVATE servicelib::postgresql)
+  endif()
   servicelib_add_test(servicelib_serde_test
       tests/serde_test.cpp)
   servicelib_add_test(servicelib_http_endpoints_test

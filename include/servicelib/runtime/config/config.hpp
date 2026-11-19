@@ -221,6 +221,8 @@ class RuntimeConfig {
                    "duplicate endpoint id: " + std::to_string(ep.GetID()));
     }
     for (const auto& dc : config_.GetDataConnectors()) {
+      if (const auto* query = dc.As<PostgreSQLUserverDataConnectorConfig>()) query->Validate();
+      if (const auto* query = dc.As<S3UserverDataConnectorConfig>()) query->Validate();
       InsertUnique(dataConnectorsByName_, dc.GetName(), dc,
                    "duplicate data connector name: " + dc.GetName());
       InsertUnique(
@@ -229,6 +231,7 @@ class RuntimeConfig {
     }
     for (const auto& ep : config_.GetEndpoints()) {
       const auto connector = dataConnectorsByID_.find(ep.GetIdDataConnector());
+      if (const auto* query = ep.As<QueryEndpointConfig>()) query->Validate();
       if (connector == dataConnectorsByID_.end()) {
         throw std::runtime_error("endpoint " + ep.GetName() +
                                  " references unknown data connector " +

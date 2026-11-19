@@ -16,6 +16,7 @@
 #include <string_view>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 #include <userver/formats/common/type.hpp>
 #include <userver/formats/json/serialize.hpp>
@@ -88,6 +89,8 @@ inline std::string_view TransformationName(
       return "SPLIT";
     case api::TransformationType::kCase:
       return "CASE";
+    case api::TransformationType::kQuery:
+      return "QUERY";
     case api::TransformationType::kSink:
       return "SINK";
     case api::TransformationType::kCycleLink:
@@ -272,6 +275,7 @@ inline std::string_view IconPath(api::TransformationType type) noexcept {
       return kCallSplit;
     case api::TransformationType::kCase:
       return kSourceFork;
+    case api::TransformationType::kQuery:
     case api::TransformationType::kSink:
       return kDatabaseArrowLeft;
     case api::TransformationType::kCycleLink:
@@ -297,6 +301,7 @@ inline std::string_view StreamIconPath(
   int endpoint_id = 0;
   if (const auto* input = stream.As<config::InputStreamConfig>()) endpoint_id = input->idEndpoint;
   else if (const auto* sink = stream.As<config::SinkStreamConfig>()) endpoint_id = sink->idEndpoint;
+  else if (const auto* query = stream.As<config::QueryStreamConfig>()) endpoint_id = query->idEndpoint;
   if (const auto endpoint = runtime.GetEndpointConfigByID(endpoint_id)) {
     if (const auto connector = runtime.GetDataConnectorByID(endpoint->GetIdDataConnector());
         connector && connector->GetType() == api::DataConnectorType::kCron) {
@@ -600,6 +605,10 @@ inline std::string MakeGraphYaml(const config::RuntimeConfig& runtime) {
         << "    idService: " << stream.GetIdService() << "\n"
         << "    xPos: " << stream.GetXPos() << "\n"
         << "    yPos: " << stream.GetYPos() << "\n";
+    if (const auto* query = stream.As<config::QueryStreamConfig>()) {
+      out << "    idEndpoint: " << query->idEndpoint << "\n";
+      out << "    valueType: " << YamlString(query->valueType) << "\n";
+    }
     if (stream.GetIdSource() != 0) {
       out << "    idSource: " << stream.GetIdSource() << "\n";
     }
@@ -610,6 +619,49 @@ inline std::string MakeGraphYaml(const config::RuntimeConfig& runtime) {
         out << stream.GetIdSources()[i];
       }
       out << "]\n";
+    }
+  }
+  // Export only Query endpoints reachable from the graph. The explicit field
+  // list deliberately excludes DSNs and arbitrary application properties.
+  std::vector<int> queryEndpoints;
+  std::vector<int> queryConnectors;
+  std::unordered_set<int> seenEndpoints;
+  std::unordered_set<int> seenConnectors;
+  for (const auto& stream : config.GetStreams()) {
+    if (const auto* query = stream.As<config::QueryStreamConfig>()) {
+      if (seenEndpoints.insert(query->idEndpoint).second)
+        queryEndpoints.push_back(query->idEndpoint);
+    }
+  }
+  if (!queryEndpoints.empty()) out << "endpoints:\n";
+  for (const auto id : queryEndpoints) {
+    const auto endpoint = runtime.GetEndpointConfigByID(id);
+    if (!endpoint) continue;
+    const auto* query = endpoint->As<config::QueryEndpointConfig>();
+    if (!query) continue;
+    out << "  - id: " << query->id << "\n"
+        << "    name: " << YamlString(query->name) << "\n"
+        << "    idDataConnector: " << query->idDataConnector << "\n"
+        << "    queryOperation: " << YamlString(query->queryOperation) << "\n"
+        << "    enabled: " << (query->enabled ? "true" : "false") << "\n"
+        << "    tracingEnabled: " << (query->tracingEnabled ? "true" : "false") << "\n"
+        << "    fetchSize: " << query->fetchSize << "\n"
+        << "    functionName: " << YamlString(query->functionName) << "\n";
+    if (!query->sqlFile.empty()) out << "    sqlFile: " << YamlString(query->sqlFile) << "\n";
+    if (!query->bucket.empty()) out << "    bucket: " << YamlString(query->bucket) << "\n";
+    if (seenConnectors.insert(query->idDataConnector).second)
+      queryConnectors.push_back(query->idDataConnector);
+  }
+  if (!queryConnectors.empty()) out << "dataConnectors:\n";
+  for (const auto id : queryConnectors) {
+    const auto connector = runtime.GetDataConnectorByID(id);
+    if (!connector) continue;
+    if (const auto* pg = connector->As<config::PostgreSQLUserverDataConnectorConfig>()) {
+      out << "  - id: " << pg->id << "\n"
+          << "    name: " << YamlString(pg->name) << "\n"
+          << "    type: PostgreSQLUserver\n"
+          << "    implementation: userver/postgresql\n"
+          << "    connectionsCount: " << pg->connectionsCount << "\n";
     }
   }
   out << "pools:\n";

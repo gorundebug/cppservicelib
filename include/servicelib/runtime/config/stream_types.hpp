@@ -380,6 +380,27 @@ struct SinkStreamConfig {
   }
 };
 
+struct QueryStreamConfig {
+  int id{};
+  std::string name;
+  std::string pipeline;
+  std::string component;
+  int idService{};
+  int idSource{};
+  double xPos{};
+  double yPos{};
+  int idEndpoint{};
+  std::string valueType;
+  PropertiesMap properties;
+
+  servicelib::api::TransformationType GetType() const noexcept {
+    return servicelib::api::TransformationType::kQuery;
+  }
+  const userver::formats::yaml::Value* GetProperty(const std::string& propName) const {
+    return detail::FindProperty(properties, propName);
+  }
+};
+
 struct CycleLinkStreamConfig {
   int id{};
   std::string name;
@@ -445,6 +466,7 @@ class StreamConfigRef {
                    std::reference_wrapper<const CaseStreamConfig>,
                    std::reference_wrapper<const WhenStreamConfig>,
                    std::reference_wrapper<const SinkStreamConfig>,
+                   std::reference_wrapper<const QueryStreamConfig>,
                    std::reference_wrapper<const CycleLinkStreamConfig>,
                    std::reference_wrapper<const DelayStreamConfig>>;
 
@@ -475,6 +497,7 @@ class StreamConfigRef {
   StreamConfigRef(const CaseStreamConfig& v) : value_(std::cref(v)) {}
   StreamConfigRef(const WhenStreamConfig& v) : value_(std::cref(v)) {}
   StreamConfigRef(const SinkStreamConfig& v) : value_(std::cref(v)) {}
+  StreamConfigRef(const QueryStreamConfig& v) : value_(std::cref(v)) {}
   StreamConfigRef(const CycleLinkStreamConfig& v) : value_(std::cref(v)) {}
   StreamConfigRef(const DelayStreamConfig& v) : value_(std::cref(v)) {}
 
@@ -858,6 +881,27 @@ inline WhenStreamConfig Parse(const userver::formats::yaml::Value& value,
 inline SinkStreamConfig Parse(const userver::formats::yaml::Value& value,
                               userver::formats::parse::To<SinkStreamConfig>) {
   SinkStreamConfig result;
+  result.id = value["id"].As<int>(0);
+  result.name = value["name"].As<std::string>("");
+  result.pipeline = value["pipeline"].As<std::string>("");
+  result.component = value["component"].As<std::string>("");
+  result.idService = value["idService"].As<int>(0);
+  result.idSource = value["idSource"].As<int>(0);
+  result.xPos = value["xPos"].As<double>(0.0);
+  result.yPos = value["yPos"].As<double>(0.0);
+  result.idEndpoint = value["idEndpoint"].As<int>(0);
+  result.valueType = value["valueType"].As<std::string>("");
+  detail::ParseRemainingProperties(
+      value,
+      {"id", "name", "pipeline", "component", "idService", "idSource", "xPos", "yPos", "idEndpoint",
+       "valueType"},
+      result.properties);
+  return result;
+}
+
+inline QueryStreamConfig Parse(const userver::formats::yaml::Value& value,
+                              userver::formats::parse::To<QueryStreamConfig>) {
+  QueryStreamConfig result;
   result.id = value["id"].As<int>(0);
   result.name = value["name"].As<std::string>("");
   result.pipeline = value["pipeline"].As<std::string>("");

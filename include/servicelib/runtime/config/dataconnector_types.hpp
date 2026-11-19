@@ -15,6 +15,7 @@
 #include <utility>
 #include <variant>
 #include <servicelib/runtime/config/pulsar.hpp>
+#include <servicelib/runtime/config/query.hpp>
 
 #include <userver/formats/parse/to.hpp>
 #include <userver/formats/parse/common_containers.hpp>
@@ -173,7 +174,9 @@ struct CustomDataConnectorConfig {
 class DataConnectorConfigRef {
  public:
   using Variant =
-      std::variant<std::reference_wrapper<const PulsarDataConnectorConfig>,
+      std::variant<std::reference_wrapper<const S3UserverDataConnectorConfig>,
+                   std::reference_wrapper<const PostgreSQLUserverDataConnectorConfig>,
+                   std::reference_wrapper<const PulsarDataConnectorConfig>,
                    std::reference_wrapper<const HttpDataConnectorConfig>,
                    std::reference_wrapper<const GrpcDataConnectorConfig>,
                    std::reference_wrapper<const KafkaDataConnectorConfig>,
@@ -194,6 +197,8 @@ class DataConnectorConfigRef {
 
  public:
   DataConnectorConfigRef(const PulsarDataConnectorConfig& v) : value_(std::cref(v)) {}
+  DataConnectorConfigRef(const S3UserverDataConnectorConfig& v) : value_(std::cref(v)) {}
+  DataConnectorConfigRef(const PostgreSQLUserverDataConnectorConfig& v) : value_(std::cref(v)) {}
   DataConnectorConfigRef(const HttpDataConnectorConfig& v)
       : value_(std::cref(v)) {}
   DataConnectorConfigRef(const GrpcDataConnectorConfig& v)
